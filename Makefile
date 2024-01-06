@@ -10,3 +10,6 @@ go-test:
 
 clean:
 	@go clean -testcache
+
+build:
+	go build ./...

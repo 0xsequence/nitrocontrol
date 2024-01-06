@@ -3,7 +3,7 @@ package enclave
 import (
 	"context"
 
-	"github.com/hf/nsm"
+	"github.com/0xsequence/nsm"
 )
 
 func NitroProvider(_ context.Context) (Session, error) {

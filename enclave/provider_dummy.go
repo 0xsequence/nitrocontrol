@@ -7,8 +7,8 @@ import (
 	"io"
 	"sync/atomic"
 
-	"github.com/hf/nsm/request"
-	"github.com/hf/nsm/response"
+	"github.com/0xsequence/nsm/request"
+	"github.com/0xsequence/nsm/response"
 )
 
 func DummyProvider(_ context.Context) (Session, error) {

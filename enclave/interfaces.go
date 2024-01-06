@@ -4,9 +4,9 @@ import (
 	"context"
 	"io"
 
+	"github.com/0xsequence/nsm/request"
+	"github.com/0xsequence/nsm/response"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
-	"github.com/hf/nsm/request"
-	"github.com/hf/nsm/response"
 )
 
 type Provider func(ctx context.Context) (Session, error)

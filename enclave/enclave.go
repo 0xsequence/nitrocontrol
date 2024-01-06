@@ -6,7 +6,7 @@ import (
 	"crypto/x509"
 	"fmt"
 
-	"github.com/hf/nsm/request"
+	"github.com/0xsequence/nsm/request"
 )
 
 // Enclave communicates with the Nitro Security Module to acquire an Attestation.
