@@ -91,7 +91,7 @@ func TestNitroAttestation_Decrypt(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			att, err := e.GetAttestation(context.Background(), []byte("nonce"))
+			att, err := e.GetAttestation(context.Background(), []byte("nonce"), []byte("user-data"))
 			require.NoError(t, err)
 
 			plaintext, err := att.Decrypt(context.Background(), []byte("ciphertext"), nil)
@@ -139,7 +139,7 @@ func TestAttestation_GenerateDataKey(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			att, err := e.GetAttestation(context.Background(), []byte("nonce"))
+			att, err := e.GetAttestation(context.Background(), []byte("nonce"), []byte("user-data"))
 			require.NoError(t, err)
 
 			dk, err := att.GenerateDataKey(context.Background(), "key-id")
