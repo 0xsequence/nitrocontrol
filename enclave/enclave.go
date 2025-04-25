@@ -83,26 +83,25 @@ func (e *Enclave) GetAttestation(ctx context.Context, nonce []byte, userData []b
 }
 
 // Measurements are calculated by the Nitro supervisor at runtime based on the enclave image.
-type Measurements struct {
-	PCR0 string
-}
+type Measurements map[uint16]string
 
 // GetMeasurements opens an NSM session and requests the PCR0 hash that is then returned
 // as part of the Measurements struct.
-func (e *Enclave) GetMeasurements(ctx context.Context) (*Measurements, error) {
+func (e *Enclave) GetMeasurements(ctx context.Context, indices []uint16) (Measurements, error) {
 	sess, err := e.provider()
 	if err != nil {
 		return nil, fmt.Errorf("open NSM session: %w", err)
 	}
 	defer sess.Close()
 
+	measurements := make(Measurements)
+	for _, index := range indices {
 	res, err := sess.Send(ctx, &request.DescribePCR{Index: index})
 	if err != nil {
 		return nil, fmt.Errorf("NSM DescribePCR call: %w", err)
 	}
-
-	m := &Measurements{
-		PCR0: hex.EncodeToString(res.DescribePCR.Data),
+		measurements[index] = hex.EncodeToString(res.DescribePCR.Data)
 	}
-	return m, nil
+
+	return measurements, nil
 }
