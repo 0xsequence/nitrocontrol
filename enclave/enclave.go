@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/0xsequence/nsm/request"
+	"github.com/0xsequence/tee-verifier/nitro"
 )
 
 // Enclave communicates with the Nitro Security Module to acquire an Attestation.
@@ -73,11 +74,18 @@ func (e *Enclave) GetAttestation(ctx context.Context, nonce []byte, userData []b
 		return nil, fmt.Errorf("attestation document is empty")
 	}
 
+	parsed, err := nitro.Parse(res.Attestation.Document)
+	if err != nil {
+		_ = sess.Close()
+		return nil, fmt.Errorf("parse attestation document: %w", err)
+	}
+
 	att := &Attestation{
-		ReadCloser: sess,
-		document:   res.Attestation.Document,
-		kms:        e.kms,
-		key:        e.privKey,
+		SignedAttestation: parsed,
+		ReadCloser:        sess,
+		document:          res.Attestation.Document,
+		kms:               e.kms,
+		key:               e.privKey,
 	}
 	return att, nil
 }
@@ -96,10 +104,10 @@ func (e *Enclave) GetMeasurements(ctx context.Context, indices []uint16) (Measur
 
 	measurements := make(Measurements)
 	for _, index := range indices {
-	res, err := sess.Send(ctx, &request.DescribePCR{Index: index})
-	if err != nil {
-		return nil, fmt.Errorf("NSM DescribePCR call: %w", err)
-	}
+		res, err := sess.Send(ctx, &request.DescribePCR{Index: index})
+		if err != nil {
+			return nil, fmt.Errorf("NSM DescribePCR call: %w", err)
+		}
 		measurements[index] = hex.EncodeToString(res.DescribePCR.Data)
 	}
 
