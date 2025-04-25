@@ -8,11 +8,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/0xsequence/tee-verifier/nitro"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 
 	"github.com/0xsequence/nitrocontrol/enclave"
 )
@@ -59,13 +59,8 @@ cJEGAbCDYhyjvtjBLNy7YDQ1hdmCnqMxg/5AIwUMkvTTRg+qepfboA==
 )
 
 func TestNitroAttestation_Decrypt(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	block, _ := pem.Decode([]byte(testPrivateKey))
 	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-	require.NoError(t, err)
-	pkixPubKey, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
 	require.NoError(t, err)
 	ciphertextForRecipient, err := base64.StdEncoding.DecodeString(testCiphertextString)
 	require.NoError(t, err)
@@ -75,8 +70,11 @@ func TestNitroAttestation_Decrypt(t *testing.T) {
 			assert.Equal(t, []byte("ciphertext"), params.CiphertextBlob)
 			assert.Equal(t, types.EncryptionAlgorithmSpecSymmetricDefault, params.EncryptionAlgorithm)
 			require.NotNil(t, params.Recipient)
-			expectedDoc := "DEV ONLY. NOT FOR PROD USE. NONCE=nonce PUBKEY=" + string(pkixPubKey)
-			assert.Equal(t, []byte(expectedDoc), params.Recipient.AttestationDocument)
+			doc, err := nitro.Parse(params.Recipient.AttestationDocument)
+			require.NoError(t, err)
+			assert.Equal(t, []byte("nonce"), doc.Nonce)
+			assert.NoError(t, doc.Validate(nitro.WithRootFingerprint("14e8bc5fabb52876f35f122289eaabfa08885837cc7f161149c6d242596258aa")))
+			assert.NoError(t, doc.Verify())
 			assert.Equal(t, types.KeyEncryptionMechanismRsaesOaepSha256, params.Recipient.KeyEncryptionAlgorithm)
 			return &kms.DecryptOutput{CiphertextForRecipient: ciphertextForRecipient}, nil
 		},
@@ -103,13 +101,8 @@ func TestNitroAttestation_Decrypt(t *testing.T) {
 }
 
 func TestAttestation_GenerateDataKey(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	block, _ := pem.Decode([]byte(testPrivateKey))
 	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-	require.NoError(t, err)
-	pkixPubKey, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
 	require.NoError(t, err)
 	ciphertextForRecipient, err := base64.StdEncoding.DecodeString(testCiphertextString)
 	require.NoError(t, err)
@@ -120,8 +113,11 @@ func TestAttestation_GenerateDataKey(t *testing.T) {
 			require.NotNil(t, params.Recipient)
 			assert.Equal(t, "key-id", *params.KeyId)
 			assert.Equal(t, types.DataKeySpecAes256, params.KeySpec)
-			expectedDoc := "DEV ONLY. NOT FOR PROD USE. NONCE=nonce PUBKEY=" + string(pkixPubKey)
-			assert.Equal(t, []byte(expectedDoc), params.Recipient.AttestationDocument)
+			doc, err := nitro.Parse(params.Recipient.AttestationDocument)
+			require.NoError(t, err)
+			assert.Equal(t, []byte("nonce"), doc.Nonce)
+			assert.NoError(t, doc.Validate(nitro.WithRootFingerprint("14e8bc5fabb52876f35f122289eaabfa08885837cc7f161149c6d242596258aa")))
+			assert.NoError(t, doc.Verify())
 			assert.Equal(t, types.KeyEncryptionMechanismRsaesOaepSha256, params.Recipient.KeyEncryptionAlgorithm)
 			return &kms.GenerateDataKeyOutput{
 				CiphertextBlob:         []byte("ciphertext"),
