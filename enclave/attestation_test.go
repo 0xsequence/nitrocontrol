@@ -80,7 +80,7 @@ func TestNitroAttestation_Decrypt(t *testing.T) {
 		},
 	}
 
-	e, err := enclave.New(context.Background(), enclave.DummyProvider, kmsMock, privKey)
+	e, err := enclave.New(context.Background(), enclave.DummyProvider(nil), kmsMock, privKey)
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
@@ -126,7 +126,7 @@ func TestAttestation_GenerateDataKey(t *testing.T) {
 		},
 	}
 
-	e, err := enclave.New(context.Background(), enclave.DummyProvider, kmsMock, privKey)
+	e, err := enclave.New(context.Background(), enclave.DummyProvider(nil), kmsMock, privKey)
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
