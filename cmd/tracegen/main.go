@@ -120,10 +120,10 @@ func main() {
 		alias := name
 		if existing, taken := aliasUsed[alias]; taken && existing != path {
 			// Collision — derive a unique alias from the path.
-			// e.g., "github.com/foo/bar/request" → "barrequest"
+			// e.g., "github.com/foo/bar-baz/request" → "barbazrequest"
 			parts := strings.Split(path, "/")
 			if len(parts) >= 2 {
-				alias = parts[len(parts)-2] + name
+				alias = sanitizeIdent(parts[len(parts)-2]) + name
 			}
 			// If still colliding, append a number.
 			base := alias
@@ -370,4 +370,16 @@ func isContextType(t types.Type) bool {
 
 func isErrorType(t types.Type) bool {
 	return t.String() == "error"
+}
+
+// sanitizeIdent strips non-alphanumeric characters from s so it can be used
+// as part of a Go identifier.
+func sanitizeIdent(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
