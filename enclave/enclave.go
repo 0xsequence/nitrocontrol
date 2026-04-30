@@ -34,7 +34,7 @@ func New(ctx context.Context, provider Provider, kms KMS, optPrivKey ...*rsa.Pri
 		if err != nil {
 			return nil, fmt.Errorf("open NSM session: %w", err)
 		}
-		defer sess.Close()
+		defer func() { _ = sess.Close() }()
 
 		e.privKey, err = rsa.GenerateKey(sess, 2048)
 		if err != nil {
@@ -100,7 +100,7 @@ func (e *Enclave) GetMeasurements(ctx context.Context, indices []uint16) (Measur
 	if err != nil {
 		return nil, fmt.Errorf("open NSM session: %w", err)
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	measurements := make(Measurements)
 	for _, index := range indices {

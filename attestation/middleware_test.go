@@ -20,7 +20,7 @@ func TestMiddleware(t *testing.T) {
 
 	errorFn := func(w http.ResponseWriter, err error) {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(err.Error()))
+		_, _ = w.Write([]byte(err.Error()))
 	}
 	loggerFromContextFn := func(ctx context.Context) *slog.Logger {
 		return slog.New(slog.DiscardHandler)

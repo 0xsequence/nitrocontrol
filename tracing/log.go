@@ -72,7 +72,7 @@ func ExtractLogs(ctx context.Context, logger *slog.Logger, span *Span) error {
 			Time:    log.Time,
 		}
 		record.AddAttrs(attrs...)
-		logger.Handler().Handle(ctx, record)
+		_ = logger.Handler().Handle(ctx, record)
 	}
 
 	return nil
