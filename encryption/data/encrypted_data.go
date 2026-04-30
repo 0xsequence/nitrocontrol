@@ -209,7 +209,9 @@ func (t *EncryptedDataTable[T]) ListByCipherKeyRef(ctx context.Context, keyRef s
 			record = newElem.Interface().(T)
 		}
 
-		if err := attributevalue.UnmarshalMap(item, &record); err != nil {
+		if err := attributevalue.UnmarshalMapWithOptions(item, &record, func(o *attributevalue.DecoderOptions) {
+				o.UseEncodingUnmarshalers = true
+			}); err != nil {
 			return nil, false, fmt.Errorf("unmarshal result: %w", err)
 		}
 		records = append(records, record)
