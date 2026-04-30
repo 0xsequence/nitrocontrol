@@ -1,0 +1,24 @@
+name: Lint
+
+on:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  golangci:
+    name: lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ["1.25.x"]
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Run linters
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.11
