@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 
@@ -14,6 +15,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/fxamacker/cbor/v2"
 )
+
+// ErrConcurrentModification is returned when a conditional write fails because
+// another writer modified the record since it was read.
+var ErrConcurrentModification = errors.New("concurrent modification")
 
 // Codec defines how typed data is serialized to bytes before encryption.
 type Codec interface {
@@ -220,7 +225,11 @@ func (t *EncryptedDataTable[T]) ListByCipherKeyRef(ctx context.Context, keyRef s
 }
 
 // UpdateEncryptedData updates the encrypted data for a record in the table.
-func (t *EncryptedDataTable[T]) UpdateEncryptedData(ctx context.Context, record T) error {
+// If oldCiphertextHash is provided, the update is conditional: it only
+// succeeds if the current CiphertextHash in DynamoDB matches, providing
+// optimistic concurrency control. Returns ErrConcurrentModification if
+// the condition fails.
+func (t *EncryptedDataTable[T]) UpdateEncryptedData(ctx context.Context, record T, oldCiphertextHash ...[]byte) error {
 	ed := record.GetEncryptedFields()
 	dbKey, err := record.DatabaseKey()
 	if err != nil {
@@ -242,7 +251,17 @@ func (t *EncryptedDataTable[T]) UpdateEncryptedData(ctx context.Context, record 
 			":ciphertextHash": &types.AttributeValueMemberB{Value: ed.CiphertextHash},
 		},
 	}
+
+	if len(oldCiphertextHash) > 0 {
+		input.ConditionExpression = aws.String("CiphertextHash = :oldCiphertextHash")
+		input.ExpressionAttributeValues[":oldCiphertextHash"] = &types.AttributeValueMemberB{Value: oldCiphertextHash[0]}
+	}
+
 	if _, err := t.db.UpdateItem(ctx, input); err != nil {
+		var ccf *types.ConditionalCheckFailedException
+		if len(oldCiphertextHash) > 0 && errors.As(err, &ccf) {
+			return ErrConcurrentModification
+		}
 		return fmt.Errorf("update item: %w", err)
 	}
 	return nil
