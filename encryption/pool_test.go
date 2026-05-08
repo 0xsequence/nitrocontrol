@@ -5,7 +5,9 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/0xsequence/nitrocontrol/enclave"
 	"github.com/0xsequence/nitrocontrol/encryption"
@@ -1028,3 +1030,538 @@ func TestPool_CleanupUnusedKeys(t *testing.T) {
 		require.Equal(t, 0, deleted)
 	})
 }
+
+func TestPool_DecryptCacheHit(t *testing.T) {
+	block, _ := pem.Decode([]byte(dummyPrivKey))
+	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	kmsClient := &MockKMS{}
+	remoteKey1 := &MockRemoteKey{}
+	remoteKey2 := &MockRemoteKey{}
+	keysTable := &MockKeysTable{}
+
+	random := &constantReader{value: 0x42}
+	enc, err := enclave.New(context.Background(), enclave.DummyProvider(random), kmsClient, privKey)
+	require.NoError(t, err)
+
+	configs := []*encryption.Config{
+		{
+			PoolSize:  10,
+			Threshold: 2,
+			RemoteKeys: map[string]encryption.RemoteKey{
+				"remoteKey1": remoteKey1,
+				"remoteKey2": remoteKey2,
+			},
+		},
+	}
+
+	att, err := enc.GetAttestation(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer func() { _ = att.Close() }()
+
+	cipherKey, privateKey := newCipherKey(t, enc)
+	shares, err := shamir.Split(privateKey, 2, 2)
+	require.NoError(t, err)
+
+	// Encrypt to get a ciphertext (this also populates the cache via Encrypt path).
+	keysTable.On("Get", mock.Anything, 0, 4).Return(cipherKey, true, nil)
+	remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").Return(shares[0], nil)
+	remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Return(shares[1], nil)
+	keysTable.On("GetLatestByKeyRef", mock.Anything, "cipherKey4", false).Return(cipherKey, true, nil)
+
+	pool := encryption.NewPool(enc, configs, keysTable, nil, nil,
+		encryption.WithCache(encryption.CacheConfig{MaxSize: 10, TTL: time.Minute}))
+
+	keyRef, ciphertext, err := pool.Encrypt(context.Background(), att, []byte("test"), []byte("aad"))
+	require.NoError(t, err)
+
+	callsAfterEncrypt := len(remoteKey1.Calls)
+
+	// Decrypt — cache hit from Encrypt's put. No additional KMS calls.
+	plaintext, err := pool.Decrypt(context.Background(), att, keyRef, ciphertext, []byte("aad"))
+	require.NoError(t, err)
+	require.Equal(t, "test", string(plaintext))
+	require.Equal(t, callsAfterEncrypt, len(remoteKey1.Calls), "Decrypt should hit cache populated by Encrypt")
+
+	// Second Decrypt — still a cache hit.
+	plaintext, err = pool.Decrypt(context.Background(), att, keyRef, ciphertext, []byte("aad"))
+	require.NoError(t, err)
+	require.Equal(t, "test", string(plaintext))
+	require.Equal(t, callsAfterEncrypt, len(remoteKey1.Calls), "repeated Decrypt should hit cache")
+}
+
+// TestPool_DecryptPopulatesCache verifies the Decrypt path itself populates the
+// cache (via fetchDEK), independent of Encrypt.
+func TestPool_DecryptPopulatesCache(t *testing.T) {
+	block, _ := pem.Decode([]byte(dummyPrivKey))
+	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	kmsClient := &MockKMS{}
+	remoteKey1 := &MockRemoteKey{}
+	remoteKey2 := &MockRemoteKey{}
+	keysTable := &MockKeysTable{}
+
+	random := &constantReader{value: 0x42}
+	enc, err := enclave.New(context.Background(), enclave.DummyProvider(random), kmsClient, privKey)
+	require.NoError(t, err)
+
+	configs := []*encryption.Config{
+		{
+			PoolSize:  10,
+			Threshold: 2,
+			RemoteKeys: map[string]encryption.RemoteKey{
+				"remoteKey1": remoteKey1,
+				"remoteKey2": remoteKey2,
+			},
+		},
+	}
+
+	att, err := enc.GetAttestation(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer func() { _ = att.Close() }()
+
+	cipherKey, privateKey := newCipherKey(t, enc)
+	shares, err := shamir.Split(privateKey, 2, 2)
+	require.NoError(t, err)
+
+	keysTable.On("Get", mock.Anything, 0, 4).Return(cipherKey, true, nil)
+	keysTable.On("GetLatestByKeyRef", mock.Anything, "cipherKey4", false).Return(cipherKey, true, nil)
+	remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").Return(shares[0], nil)
+	remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Return(shares[1], nil)
+
+	// Encrypt WITHOUT cache to get a ciphertext.
+	poolNoCache := encryption.NewPool(enc, configs, keysTable, nil, nil)
+	keyRef, ciphertext, err := poolNoCache.Encrypt(context.Background(), att, []byte("test"), []byte("aad"))
+	require.NoError(t, err)
+
+	// Create a NEW pool with cache — cache is cold.
+	poolWithCache := encryption.NewPool(enc, configs, keysTable, nil, nil,
+		encryption.WithCache(encryption.CacheConfig{MaxSize: 10, TTL: time.Minute}))
+
+	// First Decrypt — cache miss, calls KMS.
+	plaintext, err := poolWithCache.Decrypt(context.Background(), att, keyRef, ciphertext, []byte("aad"))
+	require.NoError(t, err)
+	require.Equal(t, "test", string(plaintext))
+
+	callsAfterFirst := len(remoteKey1.Calls)
+	require.Greater(t, callsAfterFirst, 0, "first Decrypt should have called KMS")
+
+	// Second Decrypt — cache hit from fetchDEK's put. No additional KMS calls.
+	plaintext, err = poolWithCache.Decrypt(context.Background(), att, keyRef, ciphertext, []byte("aad"))
+	require.NoError(t, err)
+	require.Equal(t, "test", string(plaintext))
+	require.Equal(t, callsAfterFirst, len(remoteKey1.Calls), "second Decrypt should hit cache populated by fetchDEK")
+}
+
+func TestPool_EncryptCacheHit(t *testing.T) {
+	block, _ := pem.Decode([]byte(dummyPrivKey))
+	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	kmsClient := &MockKMS{}
+	remoteKey1 := &MockRemoteKey{}
+	remoteKey2 := &MockRemoteKey{}
+	keysTable := &MockKeysTable{}
+
+	random := &constantReader{value: 0x42}
+	enc, err := enclave.New(context.Background(), enclave.DummyProvider(random), kmsClient, privKey)
+	require.NoError(t, err)
+
+	configs := []*encryption.Config{
+		{
+			PoolSize:  10,
+			Threshold: 2,
+			RemoteKeys: map[string]encryption.RemoteKey{
+				"remoteKey1": remoteKey1,
+				"remoteKey2": remoteKey2,
+			},
+		},
+	}
+
+	att, err := enc.GetAttestation(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer func() { _ = att.Close() }()
+
+	cipherKey, privateKey := newCipherKey(t, enc)
+	shares, err := shamir.Split(privateKey, 2, 2)
+	require.NoError(t, err)
+
+	keysTable.On("Get", mock.Anything, 0, 4).Return(cipherKey, true, nil)
+	remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").Return(shares[0], nil)
+	remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Return(shares[1], nil)
+
+	pool := encryption.NewPool(enc, configs, keysTable, nil, nil,
+		encryption.WithCache(encryption.CacheConfig{MaxSize: 10, TTL: time.Minute}))
+
+	// First encrypt — cache miss, calls KMS Decrypt to combine shares.
+	_, _, err = pool.Encrypt(context.Background(), att, []byte("test1"), []byte("aad"))
+	require.NoError(t, err)
+
+	decrypt1Calls := len(remoteKey1.Calls)
+
+	// Second encrypt — same key index (deterministic random), should be a cache hit.
+	_, _, err = pool.Encrypt(context.Background(), att, []byte("test2"), []byte("aad"))
+	require.NoError(t, err)
+
+	require.Equal(t, decrypt1Calls, len(remoteKey1.Calls), "expected no additional KMS calls on encrypt cache hit")
+}
+
+func TestPool_RotateInvalidatesCache(t *testing.T) {
+	block, _ := pem.Decode([]byte(dummyPrivKey))
+	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	kmsClient := &MockKMS{}
+	remoteKey1 := &MockRemoteKey{}
+	remoteKey2 := &MockRemoteKey{}
+	keysTable := &MockKeysTable{}
+
+	random := &constantReader{value: 0x42}
+	enc, err := enclave.New(context.Background(), enclave.DummyProvider(random), kmsClient, privKey)
+	require.NoError(t, err)
+
+	configs := []*encryption.Config{
+		{
+			PoolSize:  10,
+			Threshold: 2,
+			RemoteKeys: map[string]encryption.RemoteKey{
+				"remoteKey1": remoteKey1,
+				"remoteKey2": remoteKey2,
+			},
+		},
+	}
+
+	att, err := enc.GetAttestation(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer func() { _ = att.Close() }()
+
+	cipherKey, privateKey := newCipherKey(t, enc)
+	shares, err := shamir.Split(privateKey, 2, 2)
+	require.NoError(t, err)
+
+	keysTable.On("Get", mock.Anything, 0, 4).Return(cipherKey, true, nil)
+	keysTable.On("GetLatestByKeyRef", mock.Anything, "cipherKey4", false).Return(cipherKey, true, nil)
+	keysTable.On("GetLatestByKeyRef", mock.Anything, "cipherKey4", true).Return(cipherKey, true, nil)
+	keysTable.On("Deactivate", mock.Anything, "cipherKey4", 0, mock.AnythingOfType("time.Time"), mock.Anything).Return(nil)
+	remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").Return(shares[0], nil)
+	remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Return(shares[1], nil)
+
+	pool := encryption.NewPool(enc, configs, keysTable, nil, nil,
+		encryption.WithCache(encryption.CacheConfig{MaxSize: 10, TTL: time.Minute}))
+
+	// Encrypt to get ciphertext + populate cache.
+	keyRef, ciphertext, err := pool.Encrypt(context.Background(), att, []byte("test"), []byte("aad"))
+	require.NoError(t, err)
+
+	// Decrypt — should be cache hit.
+	plaintext, err := pool.Decrypt(context.Background(), att, keyRef, ciphertext, []byte("aad"))
+	require.NoError(t, err)
+	require.Equal(t, "test", string(plaintext))
+
+	callsBefore := len(remoteKey1.Calls)
+
+	// Rotate — should invalidate cache.
+	err = pool.RotateKey(context.Background(), att, "cipherKey4")
+	require.NoError(t, err)
+
+	// Decrypt again — should be cache miss, hitting KMS again.
+	plaintext, err = pool.Decrypt(context.Background(), att, keyRef, ciphertext, []byte("aad"))
+	require.NoError(t, err)
+	require.Equal(t, "test", string(plaintext))
+
+	require.Greater(t, len(remoteKey1.Calls), callsBefore, "expected additional KMS calls after cache invalidation")
+}
+
+func TestPool_NoCacheByDefault(t *testing.T) {
+	block, _ := pem.Decode([]byte(dummyPrivKey))
+	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	kmsClient := &MockKMS{}
+	remoteKey1 := &MockRemoteKey{}
+	remoteKey2 := &MockRemoteKey{}
+	keysTable := &MockKeysTable{}
+
+	random := &constantReader{value: 0x42}
+	enc, err := enclave.New(context.Background(), enclave.DummyProvider(random), kmsClient, privKey)
+	require.NoError(t, err)
+
+	configs := []*encryption.Config{
+		{
+			PoolSize:  10,
+			Threshold: 2,
+			RemoteKeys: map[string]encryption.RemoteKey{
+				"remoteKey1": remoteKey1,
+				"remoteKey2": remoteKey2,
+			},
+		},
+	}
+
+	att, err := enc.GetAttestation(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer func() { _ = att.Close() }()
+
+	cipherKey, privateKey := newCipherKey(t, enc)
+	shares, err := shamir.Split(privateKey, 2, 2)
+	require.NoError(t, err)
+
+	keysTable.On("Get", mock.Anything, 0, 4).Return(cipherKey, true, nil)
+	keysTable.On("GetLatestByKeyRef", mock.Anything, "cipherKey4", false).Return(cipherKey, true, nil)
+	remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").Return(shares[0], nil)
+	remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Return(shares[1], nil)
+
+	// No WithCache option.
+	pool := encryption.NewPool(enc, configs, keysTable, nil, nil)
+
+	keyRef, ciphertext, err := pool.Encrypt(context.Background(), att, []byte("test"), []byte("aad"))
+	require.NoError(t, err)
+
+	// First decrypt.
+	_, err = pool.Decrypt(context.Background(), att, keyRef, ciphertext, []byte("aad"))
+	require.NoError(t, err)
+	callsAfterFirst := len(remoteKey1.Calls)
+
+	// Second decrypt — no cache, so KMS is called again.
+	_, err = pool.Decrypt(context.Background(), att, keyRef, ciphertext, []byte("aad"))
+	require.NoError(t, err)
+
+	require.Greater(t, len(remoteKey1.Calls), callsAfterFirst, "without cache, every decrypt should call KMS")
+}
+
+func TestPool_DecryptSingleflight(t *testing.T) {
+	block, _ := pem.Decode([]byte(dummyPrivKey))
+	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	kmsClient := &MockKMS{}
+	remoteKey1 := &MockRemoteKey{}
+	remoteKey2 := &MockRemoteKey{}
+	keysTable := &MockKeysTable{}
+
+	random := &constantReader{value: 0x42}
+	enc, err := enclave.New(context.Background(), enclave.DummyProvider(random), kmsClient, privKey)
+	require.NoError(t, err)
+
+	configs := []*encryption.Config{
+		{
+			PoolSize:  10,
+			Threshold: 2,
+			RemoteKeys: map[string]encryption.RemoteKey{
+				"remoteKey1": remoteKey1,
+				"remoteKey2": remoteKey2,
+			},
+		},
+	}
+
+	att, err := enc.GetAttestation(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer func() { _ = att.Close() }()
+
+	cipherKey, privateKey := newCipherKey(t, enc)
+	shares, err := shamir.Split(privateKey, 2, 2)
+	require.NoError(t, err)
+
+	// First, encrypt to get a ciphertext.
+	keysTable.On("Get", mock.Anything, 0, 4).Return(cipherKey, true, nil)
+	remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").Return(shares[0], nil)
+	remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Return(shares[1], nil)
+	keysTable.On("GetLatestByKeyRef", mock.Anything, "cipherKey4", false).Return(cipherKey, true, nil)
+
+	pool := encryption.NewPool(enc, configs, keysTable, nil, nil,
+		encryption.WithCache(encryption.CacheConfig{MaxSize: 10, TTL: time.Minute}))
+
+	_, ciphertext, err := pool.Encrypt(context.Background(), att, []byte("test"), []byte("aad"))
+	require.NoError(t, err)
+
+	// Clear mock call history so we count only decrypt-path calls.
+	remoteKey1.Calls = nil
+	remoteKey2.Calls = nil
+	remoteKey1.ExpectedCalls = nil
+	remoteKey2.ExpectedCalls = nil
+
+	// Re-register expectations.
+	remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").Return(shares[0], nil)
+	remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Return(shares[1], nil)
+
+	// Invalidate cache so all goroutines start with a cold cache.
+	keysTable.On("GetLatestByKeyRef", mock.Anything, "cipherKey4", true).Return(cipherKey, true, nil)
+	keysTable.On("Deactivate", mock.Anything, "cipherKey4", 0, mock.AnythingOfType("time.Time"), mock.Anything).Return(nil)
+	err = pool.RotateKey(context.Background(), att, "cipherKey4")
+	require.NoError(t, err)
+
+	// Launch N concurrent decrypts.
+	const N = 10
+	var wg sync.WaitGroup
+	errs := make([]error, N)
+	results := make([]string, N)
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			pt, err := pool.Decrypt(context.Background(), att, "cipherKey4", ciphertext, []byte("aad"))
+			errs[idx] = err
+			if pt != nil {
+				results[idx] = string(pt)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < N; i++ {
+		require.NoError(t, errs[i], "goroutine %d failed", i)
+		require.Equal(t, "test", results[i], "goroutine %d got wrong result", i)
+	}
+
+	// With singleflight, exactly one goroutine fetches. RemoteKey1.Decrypt
+	// should be called once (one share per remote key, one fetch total).
+	decryptCalls := len(remoteKey1.Calls)
+	require.Equal(t, 1, decryptCalls, "singleflight should deduplicate concurrent fetches (got %d calls to remoteKey1)", decryptCalls)
+}
+
+func TestPool_EncryptNewKeyPopulatesCache(t *testing.T) {
+	block, _ := pem.Decode([]byte(dummyPrivKey))
+	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	kmsClient := &MockKMS{}
+	remoteKey1 := &MockRemoteKey{}
+	remoteKey2 := &MockRemoteKey{}
+	keysTable := &MockKeysTable{}
+
+	random := &constantReader{value: 0x42}
+	enc, err := enclave.New(context.Background(), enclave.DummyProvider(random), kmsClient, privKey)
+	require.NoError(t, err)
+
+	configs := []*encryption.Config{
+		{
+			PoolSize:  10,
+			Threshold: 2,
+			RemoteKeys: map[string]encryption.RemoteKey{
+				"remoteKey1": remoteKey1,
+				"remoteKey2": remoteKey2,
+			},
+		},
+	}
+
+	att, err := enc.GetAttestation(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer func() { _ = att.Close() }()
+
+	// Key does not exist — GenerateKey will be called.
+	keysTable.On("Get", mock.Anything, 0, 4).Return(nil, false, nil).Once()
+	remoteKey1.On("Encrypt", mock.Anything, att, mock.Anything).Return("encryptedShare1", nil)
+	remoteKey2.On("Encrypt", mock.Anything, att, mock.Anything).Return("encryptedShare2", nil)
+	keysTable.On("Create", mock.Anything, mock.Anything).Return(false, nil)
+
+	pool := encryption.NewPool(enc, configs, keysTable, nil, nil,
+		encryption.WithCache(encryption.CacheConfig{MaxSize: 10, TTL: time.Minute}))
+
+	// First Encrypt — GenerateKey creates key and caches DEK.
+	keyRef, ciphertext, err := pool.Encrypt(context.Background(), att, []byte("test"), []byte("aad"))
+	require.NoError(t, err)
+	require.NotEmpty(t, keyRef)
+
+	// Decrypt should hit cache — no KMS Decrypt calls needed.
+	cipherKey := &data.CipherKey{
+		Generation: 0,
+		KeyIndex:   intPtr(4),
+		KeyRef:     keyRef,
+		EncryptedShares: map[string]string{
+			"remoteKey1": "encryptedShare1",
+			"remoteKey2": "encryptedShare2",
+		},
+		CreatedAt: time.Now(),
+	}
+	hash, err := cipherKey.Hash()
+	require.NoError(t, err)
+	cipherKeyAtt, err := enc.GetAttestation(context.Background(), nil, hash)
+	require.NoError(t, err)
+	cipherKey.Attestation = cipherKeyAtt.Document()
+	_ = cipherKeyAtt.Close()
+
+	keysTable.On("GetLatestByKeyRef", mock.Anything, keyRef, false).Return(cipherKey, true, nil)
+
+	// RemoteKey.Decrypt should NOT be called — DEK is cached from GenerateKey.
+	plaintext, err := pool.Decrypt(context.Background(), att, keyRef, ciphertext, []byte("aad"))
+	require.NoError(t, err)
+	require.Equal(t, "test", string(plaintext))
+
+	remoteKey1.AssertNotCalled(t, "Decrypt", mock.Anything, mock.Anything, mock.Anything)
+	remoteKey2.AssertNotCalled(t, "Decrypt", mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestPool_MultipleKeyRefs(t *testing.T) {
+	block, _ := pem.Decode([]byte(dummyPrivKey))
+	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	kmsClient := &MockKMS{}
+	remoteKey1 := &MockRemoteKey{}
+	remoteKey2 := &MockRemoteKey{}
+	keysTable := &MockKeysTable{}
+
+	random := &constantReader{value: 0x42}
+	enc, err := enclave.New(context.Background(), enclave.DummyProvider(random), kmsClient, privKey)
+	require.NoError(t, err)
+
+	configs := []*encryption.Config{
+		{
+			PoolSize:  10,
+			Threshold: 2,
+			RemoteKeys: map[string]encryption.RemoteKey{
+				"remoteKey1": remoteKey1,
+				"remoteKey2": remoteKey2,
+			},
+		},
+	}
+
+	att, err := enc.GetAttestation(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer func() { _ = att.Close() }()
+
+	// Create two distinct cipher keys.
+	cipherKeyA, privateKeyA := newCipherKey(t, enc)
+	cipherKeyB, privateKeyB := newCipherKey(t, enc, func(key *data.CipherKey) {
+		key.KeyRef = "cipherKeyB"
+	})
+
+	sharesA, err := shamir.Split(privateKeyA, 2, 2)
+	require.NoError(t, err)
+	sharesB, err := shamir.Split(privateKeyB, 2, 2)
+	require.NoError(t, err)
+
+	keysTable.On("GetLatestByKeyRef", mock.Anything, "cipherKey4", false).Return(cipherKeyA, true, nil)
+	keysTable.On("GetLatestByKeyRef", mock.Anything, "cipherKeyB", false).Return(cipherKeyB, true, nil)
+	remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").Return(sharesA[0], nil).Once()
+	remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Return(sharesA[1], nil).Once()
+
+	pool := encryption.NewPool(enc, configs, keysTable, nil, nil,
+		encryption.WithCache(encryption.CacheConfig{MaxSize: 10, TTL: time.Minute}))
+
+	// Decrypt keyA — cache miss, populates cache for keyA.
+	_, err = pool.Decrypt(context.Background(), att, "cipherKey4", legacyCiphertext55_v2, []byte("aad"))
+	require.NoError(t, err)
+
+	// Decrypt keyA again — cache hit, no KMS.
+	callsAfterA := len(remoteKey1.Calls)
+	_, err = pool.Decrypt(context.Background(), att, "cipherKey4", legacyCiphertext55_v2, []byte("aad"))
+	require.NoError(t, err)
+	require.Equal(t, callsAfterA, len(remoteKey1.Calls), "keyA should be a cache hit")
+
+	// Decrypt keyB — cache miss for keyB (keyA cached, keyB not).
+	remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").Return(sharesB[0], nil).Once()
+	remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Return(sharesB[1], nil).Once()
+	_, err = pool.Decrypt(context.Background(), att, "cipherKeyB", legacyCiphertext55_v2, []byte("aad"))
+	require.NoError(t, err)
+	require.Greater(t, len(remoteKey1.Calls), callsAfterA, "keyB should be a cache miss")
+
+	// Decrypt keyB again — now a cache hit.
+	callsAfterB := len(remoteKey1.Calls)
+	_, err = pool.Decrypt(context.Background(), att, "cipherKeyB", legacyCiphertext55_v2, []byte("aad"))
+	require.NoError(t, err)
+	require.Equal(t, callsAfterB, len(remoteKey1.Calls), "keyB should now be a cache hit")
+}
+
+func intPtr(v int) *int { return &v }
