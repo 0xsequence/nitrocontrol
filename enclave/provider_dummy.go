@@ -71,6 +71,9 @@ sygULgtpiSjKgeg9cTvK9yhz7T0c2CxFgyhUnz4v6uZtQTJK2Q==
 -----END CERTIFICATE-----`
 
 func DummyProvider(random io.Reader) func() (Session, error) {
+	if random == nil {
+		random = rand.Reader
+	}
 	return func() (Session, error) {
 		block, _ := pem.Decode([]byte(dummyPrivKey))
 		if block == nil || block.Type != "RSA PRIVATE KEY" {
@@ -85,10 +88,6 @@ func DummyProvider(random io.Reader) func() (Session, error) {
 		caCert, err := x509.ParseCertificate(certBlock.Bytes)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse CA certificate: %v", err)
-		}
-
-		if random == nil {
-			random = rand.Reader
 		}
 
 		return &dummySession{
