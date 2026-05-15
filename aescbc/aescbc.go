@@ -70,6 +70,11 @@ func pkcs7Unpad(data []byte) ([]byte, error) {
 	if padding < 1 || padding > aes.BlockSize {
 		return nil, fmt.Errorf("invalid padding")
 	}
+	for _, b := range data[len(data)-padding:] {
+		if b != byte(padding) {
+			return nil, fmt.Errorf("invalid padding")
+		}
+	}
 	return data[:len(data)-padding], nil
 }
 
