@@ -76,7 +76,8 @@ func TestNitroAttestation_Decrypt(t *testing.T) {
 			assert.NoError(t, doc.Validate(nitro.WithRootFingerprint(doc.RootCertFingerprint())))
 			assert.NoError(t, doc.Verify())
 			assert.Equal(t, types.KeyEncryptionMechanismRsaesOaepSha256, params.Recipient.KeyEncryptionAlgorithm)
-			return &kms.DecryptOutput{CiphertextForRecipient: ciphertextForRecipient}, nil
+			keyID := "arn:aws:kms:us-east-1:000000000000:key/test-key-id"
+			return &kms.DecryptOutput{KeyId: &keyID, CiphertextForRecipient: ciphertextForRecipient}, nil
 		},
 	}
 
@@ -92,7 +93,7 @@ func TestNitroAttestation_Decrypt(t *testing.T) {
 			att, err := e.GetAttestation(context.Background(), []byte("nonce"), []byte("user-data"))
 			require.NoError(t, err)
 
-			plaintext, err := att.Decrypt(context.Background(), []byte("ciphertext"), nil)
+			plaintext, err := att.Decrypt(context.Background(), []byte("ciphertext"), []string{"arn:aws:kms:us-east-1:000000000000:key/test-key-id"})
 			require.NoError(t, err)
 			assert.Equal(t, expectedPlaintext, plaintext)
 		}()

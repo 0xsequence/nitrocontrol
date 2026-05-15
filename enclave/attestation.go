@@ -50,7 +50,13 @@ func (a *Attestation) Document() []byte {
 
 // Decrypt requests a decryption operation from KMS on ciphertext. If the key used to encrypt the
 // original data is not one of allowedKeyIDs, Decrypt returns an error.
+//
+// allowedKeyIDs must not be empty — callers must explicitly specify which KMS keys are acceptable.
 func (a *Attestation) Decrypt(ctx context.Context, ciphertext []byte, allowedKeyIDs []string) ([]byte, error) {
+	if len(allowedKeyIDs) == 0 {
+		return nil, fmt.Errorf("allowedKeyIDs must not be empty")
+	}
+
 	params := &kms.DecryptInput{
 		CiphertextBlob:      ciphertext,
 		EncryptionAlgorithm: types.EncryptionAlgorithmSpecSymmetricDefault,
@@ -117,8 +123,8 @@ func (a *Attestation) GenerateDataKey(ctx context.Context, keyID string) (*DataK
 }
 
 func keyIsAllowed(key *string, allowedKeys []string) (string, bool) {
-	if key == nil || len(allowedKeys) == 0 {
-		return "", true
+	if key == nil {
+		return "", false
 	}
 
 	for _, v := range allowedKeys {
