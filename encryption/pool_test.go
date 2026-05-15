@@ -572,7 +572,7 @@ func TestPool_Decrypt(t *testing.T) {
 		pool := encryption.NewPool(enc, configs, keysTable, nil, nil)
 		plaintext, err := pool.Decrypt(context.Background(), att, "cipherKey4", legacyCiphertext55_v2, []byte("aad"))
 		require.Empty(t, plaintext)
-		require.ErrorContains(t, err, "combine shares: less than two parts cannot be used to reconstruct the secret")
+		require.ErrorContains(t, err, "combine shares: insufficient shares: need 2, got 1")
 	})
 
 	t.Run("decrypts successfully and migrates key", func(t *testing.T) {
