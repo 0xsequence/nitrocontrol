@@ -505,6 +505,10 @@ func (p *Pool) combineShares(ctx context.Context, att *enclave.Attestation, conf
 		decryptedShares = append(decryptedShares, decryptedShare)
 	}
 
+	if len(decryptedShares) < config.Threshold {
+		return nil, fmt.Errorf("insufficient shares: need %d, got %d", config.Threshold, len(decryptedShares))
+	}
+
 	privateKey, err := shamir.Combine(decryptedShares)
 	if err != nil {
 		return nil, err
