@@ -73,7 +73,7 @@ func TestNitroAttestation_Decrypt(t *testing.T) {
 			doc, err := nitro.Parse(params.Recipient.AttestationDocument)
 			require.NoError(t, err)
 			assert.Equal(t, []byte("nonce"), doc.Nonce)
-			assert.NoError(t, doc.Validate(nitro.WithRootFingerprint("14e8bc5fabb52876f35f122289eaabfa08885837cc7f161149c6d242596258aa")))
+			assert.NoError(t, doc.Validate(nitro.WithRootFingerprint(doc.RootCertFingerprint())))
 			assert.NoError(t, doc.Verify())
 			assert.Equal(t, types.KeyEncryptionMechanismRsaesOaepSha256, params.Recipient.KeyEncryptionAlgorithm)
 			return &kms.DecryptOutput{CiphertextForRecipient: ciphertextForRecipient}, nil
@@ -116,7 +116,7 @@ func TestAttestation_GenerateDataKey(t *testing.T) {
 			doc, err := nitro.Parse(params.Recipient.AttestationDocument)
 			require.NoError(t, err)
 			assert.Equal(t, []byte("nonce"), doc.Nonce)
-			assert.NoError(t, doc.Validate(nitro.WithRootFingerprint("14e8bc5fabb52876f35f122289eaabfa08885837cc7f161149c6d242596258aa")))
+			assert.NoError(t, doc.Validate(nitro.WithRootFingerprint(doc.RootCertFingerprint())))
 			assert.NoError(t, doc.Verify())
 			assert.Equal(t, types.KeyEncryptionMechanismRsaesOaepSha256, params.Recipient.KeyEncryptionAlgorithm)
 			return &kms.GenerateDataKeyOutput{
