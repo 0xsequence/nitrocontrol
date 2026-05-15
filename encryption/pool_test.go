@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/0xsequence/nitrocontrol/enclave"
 	"github.com/0xsequence/nitrocontrol/encryption"
@@ -817,6 +818,8 @@ func TestPool_CleanupUnusedKeys(t *testing.T) {
 	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
 	require.NoError(t, err)
 
+	pastQuarantine := time.Now().Add(-48 * time.Hour)
+
 	t.Run("deletes unused keys", func(t *testing.T) {
 		kms := &MockKMS{}
 		keysTable := &MockKeysTable{}
@@ -829,8 +832,8 @@ func TestPool_CleanupUnusedKeys(t *testing.T) {
 		configs := []*encryption.Config{{PoolSize: 10, Threshold: 2, RemoteKeys: map[string]encryption.RemoteKey{}}}
 
 		inactiveKeys := []*data.CipherKey{
-			{Generation: 0, KeyRef: "unused-key-1"},
-			{Generation: 0, KeyRef: "unused-key-2"},
+			{Generation: 0, KeyRef: "unused-key-1", InactiveSince: &pastQuarantine},
+			{Generation: 0, KeyRef: "unused-key-2", InactiveSince: &pastQuarantine},
 		}
 
 		keysTable.On("ScanInactive", mock.Anything, (*string)(nil)).Return(inactiveKeys, nil, nil)
@@ -861,8 +864,8 @@ func TestPool_CleanupUnusedKeys(t *testing.T) {
 		configs := []*encryption.Config{{PoolSize: 10, Threshold: 2, RemoteKeys: map[string]encryption.RemoteKey{}}}
 
 		inactiveKeys := []*data.CipherKey{
-			{Generation: 0, KeyRef: "used-key"},
-			{Generation: 0, KeyRef: "unused-key"},
+			{Generation: 0, KeyRef: "used-key", InactiveSince: &pastQuarantine},
+			{Generation: 0, KeyRef: "unused-key", InactiveSince: &pastQuarantine},
 		}
 
 		keysTable.On("ScanInactive", mock.Anything, (*string)(nil)).Return(inactiveKeys, nil, nil)
@@ -893,7 +896,7 @@ func TestPool_CleanupUnusedKeys(t *testing.T) {
 		configs := []*encryption.Config{{PoolSize: 10, Threshold: 2, RemoteKeys: map[string]encryption.RemoteKey{}}}
 
 		inactiveKeys := []*data.CipherKey{
-			{Generation: 0, KeyRef: "key-in-table2"},
+			{Generation: 0, KeyRef: "key-in-table2", InactiveSince: &pastQuarantine},
 		}
 
 		keysTable.On("ScanInactive", mock.Anything, (*string)(nil)).Return(inactiveKeys, nil, nil)
@@ -922,8 +925,8 @@ func TestPool_CleanupUnusedKeys(t *testing.T) {
 
 		configs := []*encryption.Config{{PoolSize: 10, Threshold: 2, RemoteKeys: map[string]encryption.RemoteKey{}}}
 
-		page1Keys := []*data.CipherKey{{Generation: 0, KeyRef: "key-page1"}}
-		page2Keys := []*data.CipherKey{{Generation: 0, KeyRef: "key-page2"}}
+		page1Keys := []*data.CipherKey{{Generation: 0, KeyRef: "key-page1", InactiveSince: &pastQuarantine}}
+		page2Keys := []*data.CipherKey{{Generation: 0, KeyRef: "key-page2", InactiveSince: &pastQuarantine}}
 		cursor := "cursor-1"
 
 		keysTable.On("ScanInactive", mock.Anything, (*string)(nil)).Return(page1Keys, &cursor, nil)
@@ -988,7 +991,7 @@ func TestPool_CleanupUnusedKeys(t *testing.T) {
 
 		configs := []*encryption.Config{{PoolSize: 10, Threshold: 2, RemoteKeys: map[string]encryption.RemoteKey{}}}
 
-		inactiveKeys := []*data.CipherKey{{Generation: 0, KeyRef: "some-key"}}
+		inactiveKeys := []*data.CipherKey{{Generation: 0, KeyRef: "some-key", InactiveSince: &pastQuarantine}}
 
 		keysTable.On("ScanInactive", mock.Anything, (*string)(nil)).Return(inactiveKeys, nil, nil)
 		dataTable.On("TableARN").Return("table-1")
@@ -1013,7 +1016,7 @@ func TestPool_CleanupUnusedKeys(t *testing.T) {
 
 		configs := []*encryption.Config{{PoolSize: 10, Threshold: 2, RemoteKeys: map[string]encryption.RemoteKey{}}}
 
-		inactiveKeys := []*data.CipherKey{{Generation: 0, KeyRef: "some-key"}}
+		inactiveKeys := []*data.CipherKey{{Generation: 0, KeyRef: "some-key", InactiveSince: &pastQuarantine}}
 
 		keysTable.On("ScanInactive", mock.Anything, (*string)(nil)).Return(inactiveKeys, nil, nil)
 		dataTable.On("TableARN").Return("table-1")
@@ -1026,5 +1029,36 @@ func TestPool_CleanupUnusedKeys(t *testing.T) {
 		require.ErrorContains(t, err, "delete cipher key by ref")
 		require.ErrorContains(t, err, "delete failed")
 		require.Equal(t, 0, deleted)
+	})
+
+	t.Run("skips keys still in quarantine", func(t *testing.T) {
+		kms := &MockKMS{}
+		keysTable := &MockKeysTable{}
+		dataTable := &MockEncryptedDataTable{}
+
+		random := &constantReader{value: 0x42}
+		enc, err := enclave.New(context.Background(), enclave.DummyProvider(random), kms, privKey)
+		require.NoError(t, err)
+
+		configs := []*encryption.Config{{PoolSize: 10, Threshold: 2, RemoteKeys: map[string]encryption.RemoteKey{}}}
+
+		recentlyRotated := time.Now().Add(-1 * time.Hour)
+		inactiveKeys := []*data.CipherKey{
+			{Generation: 0, KeyRef: "recent-key", InactiveSince: &recentlyRotated},
+			{Generation: 0, KeyRef: "old-key", InactiveSince: &pastQuarantine},
+		}
+
+		keysTable.On("ScanInactive", mock.Anything, (*string)(nil)).Return(inactiveKeys, nil, nil)
+		dataTable.On("TableARN").Return("table-1")
+		dataTable.On("ReferencesCipherKeyRef", mock.Anything, "old-key").Return(false, nil)
+		keysTable.On("Delete", mock.Anything, "old-key", 0).Return(nil)
+
+		pool := encryption.NewPool(enc, configs, keysTable, []encryption.EncryptedDataTable{dataTable}, nil)
+		deleted, err := pool.CleanupUnusedKeys(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, 1, deleted)
+
+		keysTable.AssertNotCalled(t, "Delete", mock.Anything, "recent-key", mock.Anything)
+		keysTable.AssertCalled(t, "Delete", mock.Anything, "old-key", 0)
 	})
 }
