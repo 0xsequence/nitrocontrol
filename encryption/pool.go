@@ -235,7 +235,14 @@ func (p *Pool) RotateKey(ctx context.Context, att *enclave.Attestation, keyRef s
 	return nil
 }
 
+// cleanupQuarantinePeriod is the minimum time a key must be inactive before it can be deleted.
+// This ensures eventual consistency of DynamoDB GSIs has fully propagated before we trust the
+// "no references" check.
+const cleanupQuarantinePeriod = 24 * time.Hour
+
 // CleanupUnusedKeys removes cipher keys that are no longer used by any encrypted data.
+//
+// Keys must be inactive for at least 24 hours before they are eligible for deletion.
 //
 // It is inefficient and best-effort, not guaranteed to complete in a single pass, as it is
 // assumed to be called infrequently. It can, however, be retried until the returned count is 0.
@@ -253,6 +260,10 @@ func (p *Pool) CleanupUnusedKeys(ctx context.Context) (deleted int, err error) {
 			return deleted, fmt.Errorf("list generation key refs: %w", err)
 		}
 		for _, key := range keys {
+			if key.InactiveSince == nil || time.Since(*key.InactiveSince) < cleanupQuarantinePeriod {
+				continue
+			}
+
 			isUsedAnywhere := false
 			for _, dataTable := range p.dataTables {
 				isUsed, err := dataTable.ReferencesCipherKeyRef(ctx, key.KeyRef)
