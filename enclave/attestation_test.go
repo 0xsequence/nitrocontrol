@@ -76,7 +76,8 @@ func TestNitroAttestation_Decrypt(t *testing.T) {
 			assert.NoError(t, doc.Validate(nitro.WithRootFingerprint(doc.RootCertFingerprint())))
 			assert.NoError(t, doc.Verify())
 			assert.Equal(t, types.KeyEncryptionMechanismRsaesOaepSha256, params.Recipient.KeyEncryptionAlgorithm)
-			return &kms.DecryptOutput{CiphertextForRecipient: ciphertextForRecipient}, nil
+			keyID := "arn:aws:kms:us-east-1:000000000000:key/test-key-id"
+			return &kms.DecryptOutput{KeyId: &keyID, CiphertextForRecipient: ciphertextForRecipient}, nil
 		},
 	}
 
@@ -92,12 +93,75 @@ func TestNitroAttestation_Decrypt(t *testing.T) {
 			att, err := e.GetAttestation(context.Background(), []byte("nonce"), []byte("user-data"))
 			require.NoError(t, err)
 
-			plaintext, err := att.Decrypt(context.Background(), []byte("ciphertext"), nil)
+			plaintext, err := att.Decrypt(context.Background(), []byte("ciphertext"), []string{"arn:aws:kms:us-east-1:000000000000:key/test-key-id"})
 			require.NoError(t, err)
 			assert.Equal(t, expectedPlaintext, plaintext)
 		}()
 	}
 	wg.Wait()
+}
+
+func TestNitroAttestation_Decrypt_nilKeyId(t *testing.T) {
+	block, _ := pem.Decode([]byte(testPrivateKey))
+	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	kmsMock := &mockKMS{
+		decrypt: func(params *kms.DecryptInput) (*kms.DecryptOutput, error) {
+			return &kms.DecryptOutput{KeyId: nil, Plaintext: []byte("plaintext")}, nil
+		},
+	}
+
+	e, err := enclave.New(context.Background(), enclave.DummyProvider(nil), kmsMock, privKey)
+	require.NoError(t, err)
+
+	att, err := e.GetAttestation(context.Background(), []byte("nonce"), nil)
+	require.NoError(t, err)
+
+	_, err = att.Decrypt(context.Background(), []byte("ciphertext"), []string{"some-key"})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "KMS response missing KeyId")
+}
+
+func TestNitroAttestation_Decrypt_emptyAllowedKeys(t *testing.T) {
+	block, _ := pem.Decode([]byte(testPrivateKey))
+	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	kmsMock := &mockKMS{}
+
+	e, err := enclave.New(context.Background(), enclave.DummyProvider(nil), kmsMock, privKey)
+	require.NoError(t, err)
+
+	att, err := e.GetAttestation(context.Background(), []byte("nonce"), nil)
+	require.NoError(t, err)
+
+	_, err = att.Decrypt(context.Background(), []byte("ciphertext"), nil)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "allowedKeyIDs must not be empty")
+}
+
+func TestNitroAttestation_Decrypt_wrongKey(t *testing.T) {
+	block, _ := pem.Decode([]byte(testPrivateKey))
+	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	kmsMock := &mockKMS{
+		decrypt: func(params *kms.DecryptInput) (*kms.DecryptOutput, error) {
+			keyID := "arn:aws:kms:us-east-1:000000000000:key/other-key"
+			return &kms.DecryptOutput{KeyId: &keyID, Plaintext: []byte("plaintext")}, nil
+		},
+	}
+
+	e, err := enclave.New(context.Background(), enclave.DummyProvider(nil), kmsMock, privKey)
+	require.NoError(t, err)
+
+	att, err := e.GetAttestation(context.Background(), []byte("nonce"), nil)
+	require.NoError(t, err)
+
+	_, err = att.Decrypt(context.Background(), []byte("ciphertext"), []string{"arn:aws:kms:us-east-1:000000000000:key/expected-key"})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "KMS key not allowed")
 }
 
 func TestAttestation_GenerateDataKey(t *testing.T) {
