@@ -2,11 +2,70 @@ package encryption
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
+	"github.com/0xsequence/nitrocontrol/enclave"
 	"github.com/stretchr/testify/require"
 )
+
+type stubRemoteKey struct{ id string }
+
+func (k *stubRemoteKey) RemoteKeyID() string { return k.id }
+func (k *stubRemoteKey) Encrypt(_ context.Context, _ *enclave.Attestation, _ []byte) (string, error) {
+	return "", nil
+}
+func (k *stubRemoteKey) Decrypt(_ context.Context, _ *enclave.Attestation, _ string) ([]byte, error) {
+	return nil, nil
+}
+
+func TestNewConfig(t *testing.T) {
+	keys := []RemoteKey{
+		&stubRemoteKey{id: "key1"},
+		&stubRemoteKey{id: "key2"},
+		&stubRemoteKey{id: "key3"},
+	}
+
+	t.Run("valid config", func(t *testing.T) {
+		cfg, err := NewConfig(10, 2, keys)
+		require.NoError(t, err)
+		require.Equal(t, 10, cfg.PoolSize)
+		require.Equal(t, 2, cfg.Threshold)
+		require.Len(t, cfg.RemoteKeys, 3)
+	})
+
+	t.Run("zero pool size", func(t *testing.T) {
+		_, err := NewConfig(0, 2, keys)
+		require.ErrorContains(t, err, "poolSize must be at least 1")
+	})
+
+	t.Run("negative pool size", func(t *testing.T) {
+		_, err := NewConfig(-1, 2, keys)
+		require.ErrorContains(t, err, "poolSize must be at least 1")
+	})
+
+	t.Run("threshold too low", func(t *testing.T) {
+		_, err := NewConfig(10, 1, keys)
+		require.ErrorContains(t, err, "threshold must be at least 2")
+	})
+
+	t.Run("threshold zero", func(t *testing.T) {
+		_, err := NewConfig(10, 0, keys)
+		require.ErrorContains(t, err, "threshold must be at least 2")
+	})
+
+	t.Run("not enough keys for threshold", func(t *testing.T) {
+		_, err := NewConfig(10, 3, keys[:2])
+		require.ErrorContains(t, err, "number of keys (2) must be at least threshold (3)")
+	})
+
+	t.Run("exact threshold keys", func(t *testing.T) {
+		cfg, err := NewConfig(10, 2, keys[:2])
+		require.NoError(t, err)
+		require.Len(t, cfg.RemoteKeys, 2)
+	})
+}
 
 func TestConfig_areSharesValid(t *testing.T) {
 	config := &Config{

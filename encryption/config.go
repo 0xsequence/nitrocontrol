@@ -2,6 +2,7 @@ package encryption
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/0xsequence/nitrocontrol/enclave"
@@ -19,7 +20,17 @@ type Config struct {
 	RemoteKeys map[string]RemoteKey
 }
 
-func NewConfig(poolSize int, threshold int, keys []RemoteKey) *Config {
+func NewConfig(poolSize int, threshold int, keys []RemoteKey) (*Config, error) {
+	if poolSize < 1 {
+		return nil, fmt.Errorf("poolSize must be at least 1, got %d", poolSize)
+	}
+	if threshold < 2 {
+		return nil, fmt.Errorf("threshold must be at least 2, got %d", threshold)
+	}
+	if len(keys) < threshold {
+		return nil, fmt.Errorf("number of keys (%d) must be at least threshold (%d)", len(keys), threshold)
+	}
+
 	config := &Config{
 		PoolSize:   poolSize,
 		Threshold:  threshold,
@@ -30,7 +41,7 @@ func NewConfig(poolSize int, threshold int, keys []RemoteKey) *Config {
 		config.RemoteKeys[key.RemoteKeyID()] = key
 	}
 
-	return config
+	return config, nil
 }
 
 func (c *Config) areSharesValid(shares map[string]string) bool {
