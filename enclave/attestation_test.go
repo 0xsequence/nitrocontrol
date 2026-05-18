@@ -2,6 +2,8 @@ package enclave_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
@@ -222,4 +224,50 @@ func (m *mockKMS) Decrypt(ctx context.Context, params *kms.DecryptInput, optFns 
 
 func (m *mockKMS) GenerateDataKey(ctx context.Context, params *kms.GenerateDataKeyInput, optFns ...func(*kms.Options)) (*kms.GenerateDataKeyOutput, error) {
 	return m.generateDataKey(params)
+}
+
+func TestDummyProvider_WithCAKey(t *testing.T) {
+	kmsMock := &mockKMS{}
+
+	// Generate a stable CA key to reuse across provider instances
+	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	getRootFingerprint := func(opts ...enclave.DummyProviderOption) string {
+		e, err := enclave.New(context.Background(), enclave.DummyProvider(nil, opts...), kmsMock)
+		require.NoError(t, err)
+
+		att, err := e.GetAttestation(context.Background(), nil, nil)
+		require.NoError(t, err)
+		defer func() { _ = att.Close() }()
+
+		return att.RootCertFingerprint()
+	}
+
+	t.Run("same key produces same fingerprint", func(t *testing.T) {
+		fp1 := getRootFingerprint(enclave.WithCAKey(caKey))
+		fp2 := getRootFingerprint(enclave.WithCAKey(caKey))
+		fp3 := getRootFingerprint(enclave.WithCAKey(caKey))
+
+		require.NotEmpty(t, fp1)
+		require.Equal(t, fp1, fp2)
+		require.Equal(t, fp1, fp3)
+	})
+
+	t.Run("different key produces different CA", func(t *testing.T) {
+		otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		require.NoError(t, err)
+
+		fp1 := getRootFingerprint(enclave.WithCAKey(caKey))
+		fp2 := getRootFingerprint(enclave.WithCAKey(otherKey))
+
+		require.NotEqual(t, fp1, fp2)
+	})
+
+	t.Run("no key produces ephemeral CA", func(t *testing.T) {
+		fp1 := getRootFingerprint()
+		fp2 := getRootFingerprint()
+
+		require.NotEqual(t, fp1, fp2)
+	})
 }
