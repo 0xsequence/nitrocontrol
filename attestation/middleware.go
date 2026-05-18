@@ -44,7 +44,7 @@ func Middleware(enc *enclave.Enclave, errorFn func(http.ResponseWriter, error), 
 		return context.WithValue(r.Context(), contextKey, att), cancelFunc, nil
 	}
 
-	runPostMiddleware := func(w http.ResponseWriter, r *http.Request, body []byte, nonce []byte) (err error) {
+	runPostMiddleware := func(w http.ResponseWriter, r *http.Request, reqBody []byte, resBody []byte, nonce []byte) (err error) {
 		log := loggerFromContextFn(r.Context())
 		ctx, span := tracing.Trace(r.Context(), "attestation.Middleware")
 		defer func() {
@@ -52,7 +52,7 @@ func Middleware(enc *enclave.Enclave, errorFn func(http.ResponseWriter, error), 
 			span.End()
 		}()
 
-		userData, err := generateUserData(r, body)
+		userData, err := generateUserData(r, reqBody, resBody)
 		if err != nil {
 			return err
 		}
@@ -109,8 +109,7 @@ func Middleware(enc *enclave.Enclave, errorFn func(http.ResponseWriter, error), 
 
 			next.ServeHTTP(ww, r.WithContext(ctx))
 
-			r.Body = io.NopCloser(bytes.NewBuffer(reqBody))
-			if err := runPostMiddleware(ww, r, body.Bytes(), nonce); err != nil {
+			if err := runPostMiddleware(ww, r, reqBody, body.Bytes(), nonce); err != nil {
 				errorFn(w, err)
 				return
 			}
