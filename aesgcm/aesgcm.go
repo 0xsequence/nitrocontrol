@@ -10,7 +10,13 @@ import (
 
 // Encrypt encrypts plaintext using key and random entropy. Key must be a valid AES-256 key with a length of 32 bytes.
 // The result is a concatenation of nonce (using standard 12-byte nonce size) and the actual ciphertext.
+//
+// random must be a cryptographically secure random source (e.g. crypto/rand.Reader or an NSM session).
+// AES-GCM is catastrophically broken under nonce reuse.
 func Encrypt(random io.Reader, key []byte, plaintext []byte, additionalData []byte) ([]byte, error) {
+	if random == nil {
+		return nil, fmt.Errorf("random source must not be nil")
+	}
 	if len(key) != 32 {
 		return nil, fmt.Errorf("key must be 32 bytes for AES-256 but was %d", len(key))
 	}
