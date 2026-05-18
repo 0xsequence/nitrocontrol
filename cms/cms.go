@@ -58,6 +58,10 @@ func (ek *EncryptedKey) Decrypt(key *rsa.PrivateKey) ([]byte, error) {
 		return nil, errors.New("pkcs7: encryption algorithm parameters are malformed")
 	}
 
+	if len(ek.cipherText) == 0 || len(ek.cipherText)%block.BlockSize() != 0 {
+		return nil, fmt.Errorf("cms: ciphertext length %d is not a multiple of block size %d", len(ek.cipherText), block.BlockSize())
+	}
+
 	mode := cipher.NewCBCDecrypter(block, ek.iv)
 	plaintext := make([]byte, len(ek.cipherText))
 	mode.CryptBlocks(plaintext, ek.cipherText)
