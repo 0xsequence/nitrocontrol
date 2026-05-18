@@ -9,7 +9,39 @@ import (
 	"github.com/go-chi/traceid"
 )
 
-func Middleware(errorFn func(http.ResponseWriter, error)) func(http.Handler) http.Handler {
+const defaultHeaderName = "X-Sequence-Span"
+
+type middlewareConfig struct {
+	headerName     string
+	skipStackTrace bool
+}
+
+// MiddlewareOption configures the tracing middleware.
+type MiddlewareOption func(*middlewareConfig)
+
+// WithHeaderName sets the response header name for the serialized span tree.
+// Default: "X-Sequence-Span".
+func WithHeaderName(name string) MiddlewareOption {
+	return func(c *middlewareConfig) {
+		c.headerName = name
+	}
+}
+
+// WithoutStackTrace prevents stack traces from being captured in span error metadata.
+func WithoutStackTrace() MiddlewareOption {
+	return func(c *middlewareConfig) {
+		c.skipStackTrace = true
+	}
+}
+
+func Middleware(errorFn func(http.ResponseWriter, error), opts ...MiddlewareOption) func(http.Handler) http.Handler {
+	cfg := &middlewareConfig{
+		headerName: defaultHeaderName,
+	}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var body bytes.Buffer
@@ -17,19 +49,24 @@ func Middleware(errorFn func(http.ResponseWriter, error)) func(http.Handler) htt
 			ww.Tee(&body)
 			ww.Discard()
 
-			tid := traceid.FromContext(r.Context())
+			reqCtx := r.Context()
+			if cfg.skipStackTrace {
+				reqCtx = withTracingConfig(reqCtx, &tracingConfig{skipStackTrace: true})
+			}
+
+			tid := traceid.FromContext(reqCtx)
 			ctx, span := Trace(
-				r.Context(),
+				reqCtx,
 				r.URL.Path,
 				WithSpanKind(SpanKindServer),
 				WithMetadata(map[string]any{
 					"sequence.traceid": tid,
-					"net.host.name":    r.Host,
-					"server.address":   r.Host,
-					"http.method":      r.Method,
-					"http.url":         r.URL.String(),
-					"url.path":         r.URL.Path,
-					"url.query":        r.URL.RawQuery,
+					"net.host.name":   r.Host,
+					"server.address":  r.Host,
+					"http.method":     r.Method,
+					"http.url":        r.URL.Redacted(),
+					"url.path":        r.URL.Path,
+					"url.query":       r.URL.RawQuery,
 				}),
 			)
 
@@ -37,13 +74,14 @@ func Middleware(errorFn func(http.ResponseWriter, error)) func(http.Handler) htt
 
 			span.SetStatus(ww.Status())
 			span.End()
+
 			spanJSON, err := json.Marshal(span)
 			if err != nil {
 				errorFn(w, err)
 				return
 			}
 
-			w.Header().Set("X-Sequence-Span", string(spanJSON))
+			w.Header().Set(cfg.headerName, string(spanJSON))
 
 			w.WriteHeader(ww.Status())
 			if _, err := body.WriteTo(w); err != nil {

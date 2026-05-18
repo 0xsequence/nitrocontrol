@@ -28,7 +28,8 @@ type Span struct {
 	Status      int               `json:"status,omitempty"`
 	Logs        []json.RawMessage `json:"logs,omitempty"`
 
-	mu sync.Mutex
+	mu             sync.Mutex
+	skipStackTrace bool
 }
 
 func Trace(ctx context.Context, name string, opts ...func(*Span)) (context.Context, *Span) {
@@ -39,6 +40,9 @@ func Trace(ctx context.Context, name string, opts ...func(*Span)) (context.Conte
 		Metadata:    make(map[string]any),
 		Annotations: make(map[string]string),
 		Logs:        make([]json.RawMessage, 0),
+	}
+	if cfg := getTracingConfig(ctx); cfg != nil {
+		span.skipStackTrace = cfg.skipStackTrace
 	}
 	if parent != nil {
 		parent.mu.Lock()
@@ -52,6 +56,20 @@ func Trace(ctx context.Context, name string, opts ...func(*Span)) (context.Conte
 }
 
 type spanKey struct{}
+type configKey struct{}
+
+type tracingConfig struct {
+	skipStackTrace bool
+}
+
+func withTracingConfig(ctx context.Context, cfg *tracingConfig) context.Context {
+	return context.WithValue(ctx, configKey{}, cfg)
+}
+
+func getTracingConfig(ctx context.Context) *tracingConfig {
+	cfg, _ := ctx.Value(configKey{}).(*tracingConfig)
+	return cfg
+}
 
 func GetSpan(ctx context.Context) *Span {
 	span, ok := ctx.Value(spanKey{}).(*Span)
@@ -85,9 +103,11 @@ func (s *Span) RecordError(err error) {
 	s.Metadata["exception.type"] = typeStr(err)
 	s.Metadata["exception.message"] = err.Error()
 
-	stackTrace := make([]byte, 2048)
-	n := runtime.Stack(stackTrace, false)
-	s.Metadata["exception.stacktrace"] = string(stackTrace[0:n])
+	if !s.skipStackTrace {
+		stackTrace := make([]byte, 2048)
+		n := runtime.Stack(stackTrace, false)
+		s.Metadata["exception.stacktrace"] = string(stackTrace[0:n])
+	}
 }
 
 func (s *Span) SetMetadata(attrs map[string]any) {

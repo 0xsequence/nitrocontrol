@@ -40,7 +40,7 @@ func (c *wrappedClient) Do(req *http.Request) (res *http.Response, err error) {
 
 	span.SetMetadata(map[string]any{
 		"http.method":                 req.Method,
-		"http.url":                    req.URL.String(),
+		"http.url":                    req.URL.Redacted(),
 		"http.scheme":                 req.URL.Scheme,
 		"http.query":                  req.URL.RawQuery,
 		"http.path":                   req.URL.Path,
