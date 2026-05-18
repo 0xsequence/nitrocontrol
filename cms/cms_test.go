@@ -86,3 +86,17 @@ func TestDecodeCiphertextForRecipient(t *testing.T) {
 
 	require.Equal(t, plaintextKey, dataKey)
 }
+
+func TestDecryptEnvelopedKey_truncatedCiphertext(t *testing.T) {
+	block, _ := pem.Decode([]byte(testPrivateKey))
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	ciphertext, err := base64.StdEncoding.DecodeString(testCiphertextString)
+	require.NoError(t, err)
+
+	// Truncate by one byte to misalign the inner ciphertext off a block boundary
+	truncated := ciphertext[:len(ciphertext)-1]
+	_, err = cms.DecryptEnvelopedKey(key, truncated)
+	require.Error(t, err)
+}
