@@ -52,6 +52,27 @@ cJEGAbCDYhyjvtjBLNy7YDQ1hdmCnqMxg/5AIwUMkvTTRg+qepfboA==
 	}
 )
 
+func TestParse_malformedBER(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{"multi-byte tag truncated", []byte{0x1F, 0x80}},
+		{"multi-byte tag no length", []byte{0x1F, 0x01}},
+		{"tag only", []byte{0x30}},
+		{"long-form length truncated", []byte{0x30, 0x82}},
+		{"long-form length partial", []byte{0x30, 0x82, 0x01}},
+		{"length exceeds data", []byte{0x30, 0x10, 0x00}},
+		{"empty input", []byte{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := cms.Parse(tt.input)
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestDecodeCiphertextForRecipient(t *testing.T) {
 	block, _ := pem.Decode([]byte(testPrivateKey))
 	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
