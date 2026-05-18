@@ -66,7 +66,6 @@ func Middleware(errorFn func(http.ResponseWriter, error), opts ...MiddlewareOpti
 					"http.method":     r.Method,
 					"http.url":        r.URL.Redacted(),
 					"url.path":        r.URL.Path,
-					"url.query":       r.URL.RawQuery,
 				}),
 			)
 

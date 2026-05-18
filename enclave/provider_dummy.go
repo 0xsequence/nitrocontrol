@@ -22,6 +22,10 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
+// DummyProvider returns a Provider that simulates the Nitro Security Module for testing and local development.
+// The random parameter controls the entropy source for session reads (used by enclave key generation and
+// attestation randomness). It does not affect the CA key pair, which is always generated using crypto/rand
+// to ensure cryptographic security.
 func DummyProvider(random io.Reader) func() (Session, error) {
 	if random == nil {
 		random = rand.Reader

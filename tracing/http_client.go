@@ -42,7 +42,6 @@ func (c *wrappedClient) Do(req *http.Request) (res *http.Response, err error) {
 		"http.method":                 req.Method,
 		"http.url":                    req.URL.Redacted(),
 		"http.scheme":                 req.URL.Scheme,
-		"http.query":                  req.URL.RawQuery,
 		"http.path":                   req.URL.Path,
 		"http.request_content_length": req.ContentLength,
 	})

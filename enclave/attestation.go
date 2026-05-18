@@ -71,6 +71,9 @@ func (a *Attestation) Decrypt(ctx context.Context, ciphertext []byte, allowedKey
 	}
 
 	// Verify that the key used to decrypt was one of the allowed keys
+	if out.KeyId == nil {
+		return nil, fmt.Errorf("KMS response missing KeyId, cannot verify against allowed keys")
+	}
 	if keyID, ok := keyIsAllowed(out.KeyId, allowedKeyIDs); !ok {
 		return nil, fmt.Errorf("KMS key not allowed for this operation: %q", keyID)
 	}
