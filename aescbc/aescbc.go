@@ -66,8 +66,11 @@ func Encrypt(random io.Reader, key []byte, plaintext []byte) ([]byte, error) {
 
 // PKCS7 unpadding
 func pkcs7Unpad(data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("invalid padding")
+	}
 	padding := int(data[len(data)-1])
-	if padding < 1 || padding > aes.BlockSize {
+	if padding < 1 || padding > aes.BlockSize || padding > len(data) {
 		return nil, fmt.Errorf("invalid padding")
 	}
 	for _, b := range data[len(data)-padding:] {

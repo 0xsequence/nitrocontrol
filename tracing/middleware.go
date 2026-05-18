@@ -23,7 +23,9 @@ type MiddlewareOption func(*middlewareConfig)
 // Default: "X-Sequence-Span".
 func WithHeaderName(name string) MiddlewareOption {
 	return func(c *middlewareConfig) {
-		c.headerName = name
+		if name != "" {
+			c.headerName = name
+		}
 	}
 }
 
