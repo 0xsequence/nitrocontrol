@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/0xPolygon/requestid"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/traceid"
 )
 
 const defaultHeaderName = "X-Sequence-Span"
@@ -56,18 +56,18 @@ func Middleware(errorFn func(http.ResponseWriter, error), opts ...MiddlewareOpti
 				reqCtx = withTracingConfig(reqCtx, &tracingConfig{skipStackTrace: true})
 			}
 
-			tid := traceid.FromContext(reqCtx)
+			reqID := requestid.FromContext(reqCtx)
 			ctx, span := Trace(
 				reqCtx,
 				r.URL.Path,
 				WithSpanKind(SpanKindServer),
 				WithMetadata(map[string]any{
-					"sequence.traceid": tid,
-					"net.host.name":   r.Host,
-					"server.address":  r.Host,
-					"http.method":     r.Method,
-					"http.url":        r.URL.Redacted(),
-					"url.path":        r.URL.Path,
+					"request_id":     reqID,
+					"net.host.name":  r.Host,
+					"server.address": r.Host,
+					"http.method":    r.Method,
+					"http.url":       r.URL.Redacted(),
+					"url.path":       r.URL.Path,
 				}),
 			)
 

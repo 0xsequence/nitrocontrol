@@ -1,8 +1,9 @@
 module github.com/0xsequence/nitrocontrol
 
-go 1.25.0
+go 1.26.1
 
 require (
+	github.com/0xPolygon/requestid v0.1.1
 	github.com/0xsequence/nsm v0.1.0
 	github.com/0xsequence/tee-verifier v0.1.0
 	github.com/aws/aws-sdk-go-v2 v1.41.7
@@ -11,12 +12,12 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/kms v1.46.2
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/go-chi/chi/v5 v5.2.5
-	github.com/go-chi/traceid v0.3.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/tools v0.43.0
 )
 
 require (
+	github.com/0xPolygon/typeid v0.3.0 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.23 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.23 // indirect
 	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.32.16 // indirect

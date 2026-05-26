@@ -1,3 +1,7 @@
+github.com/0xPolygon/requestid v0.1.1 h1:TTZiWaB7N8mr5uzBlt+VN8WXtDmTQp+hxrn5pcNDrPk=
+github.com/0xPolygon/requestid v0.1.1/go.mod h1:ODp4VNLSHNlPF5SxWH53W74j+wHHU9DJRwg22vD28z0=
+github.com/0xPolygon/typeid v0.3.0 h1:ig/5W6MUy/25DyLsKIqiHK4StmyBZ4U0+WC6wcHvwXU=
+github.com/0xPolygon/typeid v0.3.0/go.mod h1:6gKlzXzDKFLjZLDg/L5dY/TuMIaO1rX81ArUdhWkon4=
 github.com/0xsequence/nsm v0.1.0 h1:gVOViRWPUW/c5VEmGy2gCw1az/nqP3gY7VD9V2+069k=
 github.com/0xsequence/nsm v0.1.0/go.mod h1:ETKcxsf9eirRO4mwtUMDurcb0qxyg7I4vIqgUlb4qZM=
 github.com/0xsequence/tee-verifier v0.1.0 h1:AnmooA1UOuDBrTQq3Cq0AOTCCJenNQ5qx9FL9FhzwKE=
@@ -28,8 +32,6 @@ github.com/fxamacker/cbor/v2 v2.9.0 h1:NpKPmjDBgUfBms6tr6JZkTHtfFGcMKsw3eGcmD/sa
 github.com/fxamacker/cbor/v2 v2.9.0/go.mod h1:vM4b+DJCtHn+zz7h3FFp/hDAI9WNWCsZj23V5ytsSxQ=
 github.com/go-chi/chi/v5 v5.2.5 h1:Eg4myHZBjyvJmAFjFvWgrqDTXFyOzjj7YIm3L3mu6Ug=
 github.com/go-chi/chi/v5 v5.2.5/go.mod h1:X7Gx4mteadT3eDOMTsXzmI4/rwUpOwBHLpAfupzFJP0=
-github.com/go-chi/traceid v0.3.0 h1:BYITxMnIeQasU7/U7+InZWANWxVZeCUBGTAqWleQOeg=
-github.com/go-chi/traceid v0.3.0/go.mod h1:XFfEEYZjqgML4ySh+wYBU29eqJkc2um7oEzgIc63e74=
 github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
