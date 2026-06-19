@@ -30,6 +30,39 @@ func TestDecrypt(t *testing.T) {
 	assert.Equal(t, []byte("Hello world"), dec)
 }
 
+func TestDecryptBlockSizeValidation(t *testing.T) {
+	key := []byte("12345678901234567890123456789012") // 32 bytes
+
+	t.Run("IV only, no data", func(t *testing.T) {
+		ciphertext := make([]byte, 16) // exactly aes.BlockSize
+		_, err := aescbc.Decrypt(key, ciphertext)
+		assert.ErrorContains(t, err, "ciphertext after IV must be a non-zero multiple of 16 bytes but was 0")
+	})
+
+	t.Run("non-block-aligned after IV", func(t *testing.T) {
+		ciphertext := make([]byte, 17) // aes.BlockSize + 1
+		_, err := aescbc.Decrypt(key, ciphertext)
+		assert.ErrorContains(t, err, "ciphertext after IV must be a non-zero multiple of 16 bytes but was 1")
+	})
+
+	t.Run("block-aligned after IV does not panic", func(t *testing.T) {
+		ciphertext := make([]byte, 32) // aes.BlockSize + aes.BlockSize
+		assert.NotPanics(t, func() {
+			// Will fail on padding validation, but must not panic
+			_, _ = aescbc.Decrypt(key, ciphertext)
+		})
+	})
+
+	t.Run("round-trip", func(t *testing.T) {
+		plaintext := []byte("security audit fix")
+		enc, err := aescbc.Encrypt(rand.Reader, key, plaintext)
+		require.NoError(t, err)
+		dec, err := aescbc.Decrypt(key, enc)
+		require.NoError(t, err)
+		assert.Equal(t, plaintext, dec)
+	})
+}
+
 func FuzzEncryptAndDecrypt(f *testing.F) {
 	f.Add(uint64(0), uint64(0), uint64(0), uint64(0), []byte("hello"))
 	f.Fuzz(func(t *testing.T, u0, u1, u2, u3 uint64, plaintext []byte) {
