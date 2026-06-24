@@ -28,6 +28,11 @@ func Decrypt(key []byte, ciphertext []byte) ([]byte, error) {
 
 	iv := ciphertext[:aes.BlockSize]
 	ciphertext = ciphertext[aes.BlockSize:]
+
+	if len(ciphertext) == 0 || len(ciphertext)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("ciphertext after IV must be a non-zero multiple of %d bytes but was %d", aes.BlockSize, len(ciphertext))
+	}
+
 	decrypter := cipher.NewCBCDecrypter(block, iv)
 
 	plaintextData := make([]byte, len(ciphertext))
