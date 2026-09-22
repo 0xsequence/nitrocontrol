@@ -2,6 +2,7 @@ package encryption
 
 import (
 	"container/list"
+	"context"
 	"sync"
 	"time"
 )
@@ -17,8 +18,8 @@ type CacheConfig struct {
 
 // dekCacheEntry holds a cached DEK and its LRU/TTL metadata.
 type dekCacheEntry struct {
-	dek       []byte        // 32-byte AES-256 key (owned copy)
-	keyRef    string        // for reverse lookup from LRU list element
+	dek       []byte // 32-byte AES-256 key (owned copy)
+	keyRef    string // for reverse lookup from LRU list element
 	expiresAt time.Time
 	element   *list.Element // back-pointer into LRU list
 }
@@ -37,10 +38,11 @@ type dekCache struct {
 }
 
 // inflightEntry coordinates singleflight deduplication for concurrent
-// cache misses on the same keyRef.
+// cache misses on the same keyRef. It deliberately carries no key material:
+// waiters read the result from the cache, so there is no second copy of a DEK
+// to keep track of and zero.
 type inflightEntry struct {
 	done chan struct{}
-	dek  []byte
 	err  error
 }
 
@@ -113,18 +115,6 @@ func (c *dekCache) delete(keyRef string) {
 	}
 }
 
-// clear removes and zeroes all entries.
-func (c *dekCache) clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for _, entry := range c.entries {
-		clear(entry.dek)
-	}
-	c.entries = make(map[string]*dekCacheEntry)
-	c.order.Init()
-}
-
 // evictLocked removes an entry, zeroing its DEK. Caller must hold c.mu.
 func (c *dekCache) evictLocked(entry *dekCacheEntry) {
 	clear(entry.dek)
@@ -133,19 +123,21 @@ func (c *dekCache) evictLocked(entry *dekCacheEntry) {
 }
 
 // waitOrStart implements singleflight deduplication. If another goroutine is
-// already fetching the DEK for keyRef, started=false and wait blocks until the
-// result is available. Otherwise started=true and the caller must call finish.
-func (c *dekCache) waitOrStart(keyRef string) (started bool, wait func() ([]byte, error)) {
+// already fetching the DEK for keyRef, started=false and wait blocks until that
+// fetch finishes, reporting its error; the caller then reads the DEK from the
+// cache. Otherwise started=true and the caller must call finish.
+func (c *dekCache) waitOrStart(keyRef string) (started bool, wait func(ctx context.Context) error) {
 	c.inflightMu.Lock()
 
 	if entry, ok := c.inflight[keyRef]; ok {
 		c.inflightMu.Unlock()
-		return false, func() ([]byte, error) {
-			<-entry.done
-			if entry.err != nil {
-				return nil, entry.err
+		return false, func(ctx context.Context) error {
+			select {
+			case <-entry.done:
+				return entry.err
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-			return copyBytes(entry.dek), nil
 		}
 	}
 
@@ -156,17 +148,18 @@ func (c *dekCache) waitOrStart(keyRef string) (started bool, wait func() ([]byte
 	return true, nil
 }
 
-// finish signals all waiters for keyRef with the fetch result.
-func (c *dekCache) finish(keyRef string, dek []byte, err error) {
+// finish signals all waiters for keyRef with the fetch outcome.
+func (c *dekCache) finish(keyRef string, err error) {
 	c.inflightMu.Lock()
+	defer c.inflightMu.Unlock()
+
 	entry, ok := c.inflight[keyRef]
-	if ok {
-		entry.dek = copyBytes(dek)
-		entry.err = err
-		close(entry.done)
-		delete(c.inflight, keyRef)
+	if !ok {
+		return
 	}
-	c.inflightMu.Unlock()
+	entry.err = err
+	close(entry.done)
+	delete(c.inflight, keyRef)
 }
 
 func copyBytes(b []byte) []byte {

@@ -52,7 +52,6 @@ var (
 	legacyCiphertext55_v2 = []byte("v2.QkJCQkJCQkJCQkJC9X30rkaY8XO5h_ujMLmLXiPzlYA")
 )
 
-
 func TestPool_Encrypt(t *testing.T) {
 	block, _ := pem.Decode([]byte(dummyPrivKey))
 	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
@@ -1598,3 +1597,76 @@ func TestPool_MultipleKeyRefs(t *testing.T) {
 }
 
 func intPtr(v int) *int { return &v }
+
+// A cache hit must not let an unverified cipher key row through: the row's
+// KeyRef selects which DEK encrypts the data, so its attestation is checked on
+// every Encrypt, hit or miss.
+func TestPool_EncryptVerifiesKeyOnCacheHit(t *testing.T) {
+	block, _ := pem.Decode([]byte(dummyPrivKey))
+	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	newPool := func(opts ...encryption.PoolOption) (*encryption.Pool, *enclave.Attestation) {
+		remoteKey1 := &MockRemoteKey{}
+		remoteKey2 := &MockRemoteKey{}
+		keysTable := &MockKeysTable{}
+
+		enc, err := enclave.New(context.Background(), enclave.DummyProvider(&constantReader{value: 0x42}), &MockKMS{}, privKey)
+		require.NoError(t, err)
+
+		configs := []*encryption.Config{{
+			PoolSize:  10,
+			Threshold: 2,
+			RemoteKeys: map[string]encryption.RemoteKey{
+				"remoteKey1": remoteKey1,
+				"remoteKey2": remoteKey2,
+			},
+		}}
+
+		att, err := enc.GetAttestation(context.Background(), nil, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = att.Close() })
+
+		cipherKey, privateKey := newCipherKey(t, enc)
+		shares, err := shamir.Split(privateKey, 2, 2)
+		require.NoError(t, err)
+
+		// Same KeyRef, attacker-swapped shares. The stored attestation commits
+		// to the original content, so VerifyKey must reject it.
+		tampered := *cipherKey
+		tampered.EncryptedShares = map[string]string{
+			"remoteKey1": "attackerShare1",
+			"remoteKey2": "attackerShare2",
+		}
+
+		remoteKey1.On("Decrypt", mock.Anything, mock.Anything, "encryptedShare1").Return(shares[0], nil)
+		remoteKey2.On("Decrypt", mock.Anything, mock.Anything, "encryptedShare2").Return(shares[1], nil)
+		remoteKey1.On("Decrypt", mock.Anything, mock.Anything, "attackerShare1").Return(shares[0], nil)
+		remoteKey2.On("Decrypt", mock.Anything, mock.Anything, "attackerShare2").Return(shares[1], nil)
+
+		keysTable.On("Get", mock.Anything, 0, 4).Return(cipherKey, true, nil).Once()
+		keysTable.On("Get", mock.Anything, 0, 4).Return(&tampered, true, nil)
+
+		return encryption.NewPool(enc, configs, keysTable, nil, nil, opts...), att
+	}
+
+	t.Run("without cache", func(t *testing.T) {
+		pool, att := newPool()
+
+		_, _, err := pool.Encrypt(context.Background(), att, []byte("first"), []byte("aad"))
+		require.NoError(t, err)
+
+		_, _, err = pool.Encrypt(context.Background(), att, []byte("second"), []byte("aad"))
+		require.ErrorContains(t, err, "verify key")
+	})
+
+	t.Run("with cache", func(t *testing.T) {
+		pool, att := newPool(encryption.WithCache(encryption.CacheConfig{MaxSize: 10, TTL: time.Minute}))
+
+		_, _, err := pool.Encrypt(context.Background(), att, []byte("first"), []byte("aad"))
+		require.NoError(t, err)
+
+		_, _, err = pool.Encrypt(context.Background(), att, []byte("second"), []byte("aad"))
+		require.ErrorContains(t, err, "verify key")
+	})
+}

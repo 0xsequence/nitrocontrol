@@ -119,16 +119,21 @@ func (p *Pool) Encrypt(ctx context.Context, att *enclave.Attestation, plaintext 
 			p.cache.put(key.KeyRef, privateKey)
 		}
 	} else {
-		// Existing key — try cache before KMS.
+		// The row is an unverified read and its KeyRef selects the DEK this
+		// data is encrypted under, so the attestation is checked before the
+		// cache is consulted — a hit must not be able to skip it. Verification
+		// is local (COSE + cert chain), so the KMS round-trips are still what
+		// the cache saves.
+		if err := p.VerifyKey(ctx, att, key); err != nil {
+			return "", nil, fmt.Errorf("verify key: %w", err)
+		}
+
 		if p.cache != nil {
 			if dek, ok := p.cache.get(key.KeyRef); ok {
 				privateKey = dek
 			}
 		}
 		if privateKey == nil {
-			if err := p.VerifyKey(ctx, att, key); err != nil {
-				return "", nil, fmt.Errorf("verify key: %w", err)
-			}
 			privateKey, err = p.combineShares(ctx, att, config, key.EncryptedShares)
 			if err != nil {
 				return "", nil, fmt.Errorf("combine shares: %w", err)
@@ -174,20 +179,9 @@ func (p *Pool) Decrypt(ctx context.Context, att *enclave.Attestation, keyRef str
 		return nil, fmt.Errorf("decode ciphertext: %w", err)
 	}
 
-	// Try cache.
-	var privateKey []byte
-	if p.cache != nil {
-		if dek, ok := p.cache.get(keyRef); ok {
-			privateKey = dek
-		}
-	}
-
-	// Cache miss — full fetch with singleflight dedup.
-	if privateKey == nil {
-		privateKey, err = p.fetchDEK(ctx, att, keyRef)
-		if err != nil {
-			return nil, err
-		}
+	privateKey, err := p.fetchDEK(ctx, att, keyRef)
+	if err != nil {
+		return nil, err
 	}
 
 	// Decrypt data.
@@ -205,18 +199,54 @@ func (p *Pool) Decrypt(ctx context.Context, att *enclave.Attestation, keyRef str
 	return decrypted, nil
 }
 
-// fetchDEK retrieves a DEK through the full path: DynamoDB lookup, attestation
-// verification, KMS share decryption, and Shamir combine. It uses singleflight
-// to deduplicate concurrent fetches for the same keyRef, and populates the cache.
-func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef string) (privateKey []byte, err error) {
-	// Singleflight: if another goroutine is already fetching this keyRef, wait.
-	if p.cache != nil {
-		started, wait := p.cache.waitOrStart(keyRef)
-		if !started {
-			return wait()
-		}
-		defer func() { p.cache.finish(keyRef, privateKey, err) }()
+// fetchDEK returns the DEK for keyRef, serving it from the cache when possible
+// and otherwise loading it through loadDEK. Concurrent misses on the same keyRef
+// are deduplicated so only one of them performs the KMS round-trips.
+func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef string) ([]byte, error) {
+	if p.cache == nil {
+		return p.loadDEK(ctx, att, keyRef)
 	}
+
+	if dek, ok := p.cache.get(keyRef); ok {
+		return dek, nil
+	}
+
+	started, wait := p.cache.waitOrStart(keyRef)
+	if !started {
+		if err := wait(ctx); err != nil {
+			return nil, err
+		}
+		if dek, ok := p.cache.get(keyRef); ok {
+			return dek, nil
+		}
+		// Evicted between the winner's put and this read; load it ourselves
+		// rather than waiting again.
+		return p.loadDEK(ctx, att, keyRef)
+	}
+
+	var (
+		dek []byte
+		err error
+	)
+	// Deferred so a panic in loadDEK still releases the waiters, and ordered
+	// after the put so the cache is populated by the time they re-read it.
+	defer func() { p.cache.finish(keyRef, err) }()
+
+	dek, err = p.loadDEK(ctx, att, keyRef)
+	if err == nil {
+		p.cache.put(keyRef, dek)
+	}
+	return dek, err
+}
+
+// loadDEK recovers a DEK through the full path: DynamoDB lookup, attestation
+// verification, KMS share decryption, and Shamir combine.
+func (p *Pool) loadDEK(ctx context.Context, att *enclave.Attestation, keyRef string) (privateKey []byte, err error) {
+	ctx, span := tracing.Trace(ctx, "encryption.Pool.loadDEK", tracing.WithAnnotation("key_ref", keyRef))
+	defer func() {
+		span.RecordError(err)
+		span.End()
+	}()
 
 	key, found, err := p.keysTable.GetLatestByKeyRef(ctx, keyRef, false)
 	if err != nil {
@@ -227,6 +257,11 @@ func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef st
 	}
 	if err := p.VerifyKey(ctx, att, key); err != nil {
 		return nil, fmt.Errorf("verify key: %w", err)
+	}
+
+	span.SetAnnotation("generation", strconv.Itoa(key.Generation))
+	if key.KeyIndex != nil {
+		span.SetAnnotation("key_index", strconv.Itoa(*key.KeyIndex))
 	}
 
 	config, err := p.getConfig(key.Generation)
@@ -242,12 +277,8 @@ func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef st
 		return nil, fmt.Errorf("combine shares: %w", err)
 	}
 
-	if p.cache != nil {
-		p.cache.put(keyRef, privateKey)
-	}
-
-	// Trigger migration if needed. Migration is synchronous but non-fatal:
-	// failure is logged and does not affect the returned DEK.
+	// Migration is synchronous but non-fatal: failure is logged, the DEK is
+	// still returned, and the next load past the cache TTL retries it.
 	if p.keyNeedsMigration(key) {
 		if err := p.migrateKey(ctx, att, key, privateKey); err != nil {
 			p.logger.ErrorContext(ctx, "migrating key failed", "error", err, "key_ref", key.KeyRef, "generation", key.Generation, "key_index", key.KeyIndex)
@@ -350,6 +381,9 @@ func (p *Pool) CleanupUnusedKeys(ctx context.Context) (deleted int, err error) {
 				p.logger.InfoContext(ctx, "deleting unused cipher key", "key_ref", key.KeyRef, "generation", key.Generation, "key_index", key.KeyIndex)
 				if err := p.keysTable.Delete(ctx, key.KeyRef, key.Generation); err != nil {
 					return deleted, fmt.Errorf("delete cipher key by ref %q: %w", key.KeyRef, err)
+				}
+				if p.cache != nil {
+					p.cache.delete(key.KeyRef)
 				}
 				deleted++
 			}
