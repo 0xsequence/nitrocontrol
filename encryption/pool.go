@@ -176,8 +176,9 @@ func (p *Pool) Encrypt(ctx context.Context, att *enclave.Attestation, plaintext 
 
 // Decrypt decrypts the ciphertext using the latest cipher key from the Pool referenced by the keyRef.
 //
-// The key is verified against the attestation and migrated to the current generation if needed.
-// If a DEK cache is configured, cached keys bypass DynamoDB and KMS on hit.
+// The key is verified against the attestation and migrated to the current
+// generation if needed. A cached DEK skips all of that: it was verified when it
+// was loaded, and its key ref never maps to different key material.
 func (p *Pool) Decrypt(ctx context.Context, att *enclave.Attestation, keyRef string, ciphertext []byte, additionalData []byte) (plaintext []byte, err error) {
 	ctx, span := tracing.Trace(ctx, "encryption.Pool.Decrypt", tracing.WithAnnotation("key_ref", keyRef))
 	defer func() {
@@ -215,7 +216,8 @@ func (p *Pool) Decrypt(ctx context.Context, att *enclave.Attestation, keyRef str
 // are deduplicated so only one of them performs the KMS round-trips.
 func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef string) ([]byte, error) {
 	if p.cache == nil {
-		return p.loadDEK(ctx, att, keyRef)
+		dek, _, err := p.loadDEK(ctx, att, keyRef)
+		return dek, err
 	}
 
 	// The caller's span, not loadDEK's child: the annotation belongs on the
@@ -228,11 +230,13 @@ func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef st
 	}
 
 	loaded := p.cache.group.DoChan(keyRef, func() (any, error) {
-		dek, err := p.loadDEK(ctx, att, keyRef)
+		dek, cacheable, err := p.loadDEK(ctx, att, keyRef)
 		if err != nil {
 			return nil, err
 		}
-		p.cache.put(keyRef, dek)
+		if cacheable {
+			p.cache.put(keyRef, dek)
+		}
 		return dek, nil
 	})
 
@@ -254,8 +258,10 @@ func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef st
 }
 
 // loadDEK recovers a DEK through the full path: DynamoDB lookup, attestation
-// verification, KMS share decryption, and Shamir combine.
-func (p *Pool) loadDEK(ctx context.Context, att *enclave.Attestation, keyRef string) (privateKey []byte, err error) {
+// verification, KMS share decryption, and Shamir combine. It reports whether the
+// result may be cached; a key whose migration failed must not be, or the retry
+// is suppressed until the entry expires.
+func (p *Pool) loadDEK(ctx context.Context, att *enclave.Attestation, keyRef string) (privateKey []byte, cacheable bool, err error) {
 	ctx, span := tracing.Trace(ctx, "encryption.Pool.loadDEK", tracing.WithAnnotation("key_ref", keyRef))
 	defer func() {
 		span.RecordError(err)
@@ -264,13 +270,13 @@ func (p *Pool) loadDEK(ctx context.Context, att *enclave.Attestation, keyRef str
 
 	key, found, err := p.keysTable.GetLatestByKeyRef(ctx, keyRef, false)
 	if err != nil {
-		return nil, fmt.Errorf("get latest key: %w", err)
+		return nil, false, fmt.Errorf("get latest key: %w", err)
 	}
 	if !found {
-		return nil, fmt.Errorf("key not found")
+		return nil, false, fmt.Errorf("key not found")
 	}
 	if err := p.VerifyKey(ctx, att, key); err != nil {
-		return nil, fmt.Errorf("verify key: %w", err)
+		return nil, false, fmt.Errorf("verify key: %w", err)
 	}
 
 	span.SetAnnotation("generation", strconv.Itoa(key.Generation))
@@ -280,26 +286,27 @@ func (p *Pool) loadDEK(ctx context.Context, att *enclave.Attestation, keyRef str
 
 	config, err := p.getConfig(key.Generation)
 	if err != nil {
-		return nil, fmt.Errorf("get config: %w", err)
+		return nil, false, fmt.Errorf("get config: %w", err)
 	}
 	if !config.areSharesValid(key.EncryptedShares) {
-		return nil, fmt.Errorf("shares are invalid")
+		return nil, false, fmt.Errorf("shares are invalid")
 	}
 
 	privateKey, err = p.combineShares(ctx, att, config, key.EncryptedShares)
 	if err != nil {
-		return nil, fmt.Errorf("combine shares: %w", err)
+		return nil, false, fmt.Errorf("combine shares: %w", err)
 	}
 
-	// Migration is synchronous but non-fatal: failure is logged, the DEK is
-	// still returned, and the next load past the cache TTL retries it.
+	// Migration is non-fatal: the DEK is returned either way, but a failed
+	// migration leaves the key uncacheable so the next decrypt retries it.
 	if p.keyNeedsMigration(key) {
 		if err := p.migrateKey(ctx, att, key, privateKey); err != nil {
 			p.logger.ErrorContext(ctx, "migrating key failed", "error", err, "key_ref", key.KeyRef, "generation", key.Generation, "key_index", key.KeyIndex)
+			return privateKey, false, nil
 		}
 	}
 
-	return privateKey, nil
+	return privateKey, true, nil
 }
 
 // RotateKey marks a key as inactive by setting its KeyIndex to a negative value. It won't be used for encrypting
