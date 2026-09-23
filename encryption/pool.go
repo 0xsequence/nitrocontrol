@@ -45,6 +45,12 @@ type Pool struct {
 	cache      *dekCache // nil when caching disabled
 }
 
+// annotationDEKCache records how a DEK was obtained on the span of the
+// operation that needed it: served from the cache, loaded through DynamoDB and
+// KMS, or coalesced onto another goroutine's in-flight load. It is what tells
+// you whether a slow Encrypt/Decrypt paid for a KMS round-trip.
+const annotationDEKCache = "dek_cache"
+
 // PoolOption configures optional Pool behavior.
 type PoolOption func(*Pool)
 
@@ -131,9 +137,13 @@ func (p *Pool) Encrypt(ctx context.Context, att *enclave.Attestation, plaintext 
 		if p.cache != nil {
 			if dek, ok := p.cache.get(key.KeyRef); ok {
 				privateKey = dek
+				span.SetAnnotation(annotationDEKCache, "hit")
 			}
 		}
 		if privateKey == nil {
+			if p.cache != nil {
+				span.SetAnnotation(annotationDEKCache, "miss")
+			}
 			privateKey, err = p.combineShares(ctx, att, config, key.EncryptedShares)
 			if err != nil {
 				return "", nil, fmt.Errorf("combine shares: %w", err)
@@ -207,12 +217,18 @@ func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef st
 		return p.loadDEK(ctx, att, keyRef)
 	}
 
+	// The caller's span, not loadDEK's child: the annotation belongs on the
+	// operation whose latency it explains.
+	span := tracing.GetSpan(ctx)
+
 	if dek, ok := p.cache.get(keyRef); ok {
+		span.SetAnnotation(annotationDEKCache, "hit")
 		return dek, nil
 	}
 
 	started, wait := p.cache.waitOrStart(keyRef)
 	if !started {
+		span.SetAnnotation(annotationDEKCache, "coalesced")
 		if err := wait(ctx); err != nil {
 			return nil, err
 		}
@@ -221,8 +237,11 @@ func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef st
 		}
 		// Evicted between the winner's put and this read; load it ourselves
 		// rather than waiting again.
+		span.SetAnnotation(annotationDEKCache, "miss")
 		return p.loadDEK(ctx, att, keyRef)
 	}
+
+	span.SetAnnotation(annotationDEKCache, "miss")
 
 	var (
 		dek []byte
