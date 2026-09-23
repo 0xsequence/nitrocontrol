@@ -2,9 +2,11 @@ package encryption
 
 import (
 	"container/list"
-	"context"
+	"slices"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // CacheConfig configures the optional DEK (data encryption key) cache.
@@ -33,26 +35,16 @@ type dekCache struct {
 	maxSize int
 	ttl     time.Duration
 
-	inflightMu sync.Mutex
-	inflight   map[string]*inflightEntry
-}
-
-// inflightEntry coordinates singleflight deduplication for concurrent
-// cache misses on the same keyRef. It deliberately carries no key material:
-// waiters read the result from the cache, so there is no second copy of a DEK
-// to keep track of and zero.
-type inflightEntry struct {
-	done chan struct{}
-	err  error
+	// group collapses concurrent misses on the same keyRef into one load.
+	group singleflight.Group
 }
 
 func newDEKCache(maxSize int, ttl time.Duration) *dekCache {
 	return &dekCache{
-		entries:  make(map[string]*dekCacheEntry),
-		order:    list.New(),
-		maxSize:  maxSize,
-		ttl:      ttl,
-		inflight: make(map[string]*inflightEntry),
+		entries: make(map[string]*dekCacheEntry),
+		order:   list.New(),
+		maxSize: maxSize,
+		ttl:     ttl,
 	}
 }
 
@@ -72,7 +64,7 @@ func (c *dekCache) get(keyRef string) ([]byte, bool) {
 	}
 
 	c.order.MoveToFront(entry.element)
-	return copyBytes(entry.dek), true
+	return slices.Clone(entry.dek), true
 }
 
 // put stores a copy of dek in the cache, evicting the LRU entry if full.
@@ -83,14 +75,14 @@ func (c *dekCache) put(keyRef string, dek []byte) {
 	if entry, ok := c.entries[keyRef]; ok {
 		// Update existing entry.
 		clear(entry.dek)
-		entry.dek = copyBytes(dek)
+		entry.dek = slices.Clone(dek)
 		entry.expiresAt = time.Now().Add(c.ttl)
 		c.order.MoveToFront(entry.element)
 		return
 	}
 
 	entry := &dekCacheEntry{
-		dek:       copyBytes(dek),
+		dek:       slices.Clone(dek),
 		keyRef:    keyRef,
 		expiresAt: time.Now().Add(c.ttl),
 	}
@@ -120,53 +112,4 @@ func (c *dekCache) evictLocked(entry *dekCacheEntry) {
 	clear(entry.dek)
 	c.order.Remove(entry.element)
 	delete(c.entries, entry.keyRef)
-}
-
-// waitOrStart implements singleflight deduplication. If another goroutine is
-// already fetching the DEK for keyRef, started=false and wait blocks until that
-// fetch finishes, reporting its error; the caller then reads the DEK from the
-// cache. Otherwise started=true and the caller must call finish.
-func (c *dekCache) waitOrStart(keyRef string) (started bool, wait func(ctx context.Context) error) {
-	c.inflightMu.Lock()
-
-	if entry, ok := c.inflight[keyRef]; ok {
-		c.inflightMu.Unlock()
-		return false, func(ctx context.Context) error {
-			select {
-			case <-entry.done:
-				return entry.err
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-	}
-
-	entry := &inflightEntry{done: make(chan struct{})}
-	c.inflight[keyRef] = entry
-	c.inflightMu.Unlock()
-
-	return true, nil
-}
-
-// finish signals all waiters for keyRef with the fetch outcome.
-func (c *dekCache) finish(keyRef string, err error) {
-	c.inflightMu.Lock()
-	defer c.inflightMu.Unlock()
-
-	entry, ok := c.inflight[keyRef]
-	if !ok {
-		return
-	}
-	entry.err = err
-	close(entry.done)
-	delete(c.inflight, keyRef)
-}
-
-func copyBytes(b []byte) []byte {
-	if b == nil {
-		return nil
-	}
-	cp := make([]byte, len(b))
-	copy(cp, b)
-	return cp
 }

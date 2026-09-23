@@ -1,8 +1,6 @@
 package encryption
 
 import (
-	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -192,147 +190,6 @@ func TestDEKCache_DeleteMissing(t *testing.T) {
 	c.delete("nonexistent")
 }
 
-func TestDEKCache_Singleflight(t *testing.T) {
-	c := newDEKCache(10, time.Minute)
-
-	dek := []byte("0123456789abcdef0123456789abcdef")
-
-	// First caller starts the fetch.
-	started, _ := c.waitOrStart("ref1")
-	if !started {
-		t.Fatal("first caller should start")
-	}
-
-	// Second and third callers should wait.
-	var wg sync.WaitGroup
-	results := make([][]byte, 2)
-	errs := make([]error, 2)
-
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			s, wait := c.waitOrStart("ref1")
-			if s {
-				t.Error("subsequent caller should not start")
-				return
-			}
-			if errs[idx] = wait(context.Background()); errs[idx] != nil {
-				return
-			}
-			results[idx], _ = c.get("ref1")
-		}(i)
-	}
-
-	// Simulate the winner completing: populate the cache, then release waiters.
-	time.Sleep(10 * time.Millisecond) // let goroutines reach wait()
-	c.put("ref1", dek)
-	c.finish("ref1", nil)
-
-	wg.Wait()
-
-	for i := 0; i < 2; i++ {
-		if errs[i] != nil {
-			t.Fatalf("waiter %d got error: %v", i, errs[i])
-		}
-		if string(results[i]) != string(dek) {
-			t.Fatalf("waiter %d got wrong dek", i)
-		}
-	}
-
-	// Each waiter should have received an independent copy.
-	results[0][0] = 0xFF
-	if results[1][0] == 0xFF {
-		t.Fatal("waiters should receive independent copies")
-	}
-}
-
-func TestDEKCache_SingleflightContextCancel(t *testing.T) {
-	c := newDEKCache(10, time.Minute)
-
-	started, _ := c.waitOrStart("ref1")
-	if !started {
-		t.Fatal("first caller should start")
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		_, wait := c.waitOrStart("ref1")
-		done <- wait(ctx)
-	}()
-
-	time.Sleep(10 * time.Millisecond)
-	cancel()
-
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("got %v, want context.Canceled", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("waiter ignored context cancellation")
-	}
-
-	// The starter can still finish without affecting the cancelled waiter.
-	c.finish("ref1", nil)
-}
-
-func TestDEKCache_SingleflightError(t *testing.T) {
-	c := newDEKCache(10, time.Minute)
-	fetchErr := &testError{msg: "kms failed"}
-
-	started, _ := c.waitOrStart("ref1")
-	if !started {
-		t.Fatal("first caller should start")
-	}
-
-	var wg sync.WaitGroup
-	waiterErrs := make([]error, 2)
-
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			_, wait := c.waitOrStart("ref1")
-			waiterErrs[idx] = wait(context.Background())
-		}(i)
-	}
-
-	time.Sleep(10 * time.Millisecond)
-	c.finish("ref1", fetchErr)
-
-	wg.Wait()
-
-	for i := 0; i < 2; i++ {
-		if waiterErrs[i] == nil {
-			t.Fatalf("waiter %d should have received error", i)
-		}
-		if waiterErrs[i].Error() != "kms failed" {
-			t.Fatalf("waiter %d got error %q, want %q", i, waiterErrs[i].Error(), "kms failed")
-		}
-	}
-}
-
-func TestDEKCache_SingleflightIndependentKeys(t *testing.T) {
-	c := newDEKCache(10, time.Minute)
-
-	// Start fetch for ref1.
-	started1, _ := c.waitOrStart("ref1")
-	if !started1 {
-		t.Fatal("first caller for ref1 should start")
-	}
-
-	// Start fetch for ref2 — should NOT be blocked by ref1.
-	started2, _ := c.waitOrStart("ref2")
-	if !started2 {
-		t.Fatal("first caller for ref2 should start independently")
-	}
-
-	c.finish("ref1", nil)
-	c.finish("ref2", nil)
-}
-
 func TestDEKCache_ConcurrentAccess(t *testing.T) {
 	c := newDEKCache(10, time.Minute)
 	dek := []byte("0123456789abcdef0123456789abcdef")
@@ -357,9 +214,3 @@ func TestDEKCache_ConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
-
-type testError struct {
-	msg string
-}
-
-func (e *testError) Error() string { return e.msg }

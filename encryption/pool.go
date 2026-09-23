@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"time"
 
@@ -226,36 +227,30 @@ func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef st
 		return dek, nil
 	}
 
-	started, wait := p.cache.waitOrStart(keyRef)
-	if !started {
-		span.SetAnnotation(annotationDEKCache, "coalesced")
-		if err := wait(ctx); err != nil {
+	loaded := p.cache.group.DoChan(keyRef, func() (any, error) {
+		dek, err := p.loadDEK(ctx, att, keyRef)
+		if err != nil {
 			return nil, err
 		}
-		if dek, ok := p.cache.get(keyRef); ok {
-			return dek, nil
-		}
-		// Evicted between the winner's put and this read; load it ourselves
-		// rather than waiting again.
-		span.SetAnnotation(annotationDEKCache, "miss")
-		return p.loadDEK(ctx, att, keyRef)
-	}
-
-	span.SetAnnotation(annotationDEKCache, "miss")
-
-	var (
-		dek []byte
-		err error
-	)
-	// Deferred so a panic in loadDEK still releases the waiters, and ordered
-	// after the put so the cache is populated by the time they re-read it.
-	defer func() { p.cache.finish(keyRef, err) }()
-
-	dek, err = p.loadDEK(ctx, att, keyRef)
-	if err == nil {
 		p.cache.put(keyRef, dek)
+		return dek, nil
+	})
+
+	select {
+	case res := <-loaded:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		if res.Shared {
+			span.SetAnnotation(annotationDEKCache, "coalesced")
+		} else {
+			span.SetAnnotation(annotationDEKCache, "miss")
+		}
+		// Shared between everyone who coalesced onto this load.
+		return slices.Clone(res.Val.([]byte)), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return dek, err
 }
 
 // loadDEK recovers a DEK through the full path: DynamoDB lookup, attestation
