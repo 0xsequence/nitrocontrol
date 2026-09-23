@@ -46,18 +46,15 @@ type Pool struct {
 	cache      *dekCache // nil when caching disabled
 }
 
-// annotationDEKCache records how a DEK was obtained on the span of the
-// operation that needed it: served from the cache, loaded through DynamoDB and
-// KMS, or coalesced onto another goroutine's in-flight load. It is what tells
-// you whether a slow Encrypt/Decrypt paid for a KMS round-trip.
+// annotationDEKCache records whether an operation's DEK came from the cache, a
+// full load, or another goroutine's in-flight load.
 const annotationDEKCache = "dek_cache"
 
 // PoolOption configures optional Pool behavior.
 type PoolOption func(*Pool)
 
 // WithCache enables an in-memory LRU cache for decrypted data encryption keys,
-// eliminating KMS round-trips on cache hits. The cache is local to this process
-// and zeroes key material on eviction.
+// eliminating KMS round-trips on cache hits. The cache is local to this process.
 func WithCache(cfg CacheConfig) PoolOption {
 	return func(p *Pool) {
 		if cfg.MaxSize > 0 && cfg.TTL > 0 {
@@ -126,11 +123,9 @@ func (p *Pool) Encrypt(ctx context.Context, att *enclave.Attestation, plaintext 
 			p.cache.put(key.KeyRef, privateKey)
 		}
 	} else {
-		// The row is an unverified read and its KeyRef selects the DEK this
-		// data is encrypted under, so the attestation is checked before the
-		// cache is consulted — a hit must not be able to skip it. Verification
-		// is local (COSE + cert chain), so the KMS round-trips are still what
-		// the cache saves.
+		// The row is an unverified read and its KeyRef picks the DEK, so the
+		// attestation is checked before the cache is consulted; a hit must not
+		// skip it. Verification is local, so the cache still saves the KMS calls.
 		if err := p.VerifyKey(ctx, att, key); err != nil {
 			return "", nil, fmt.Errorf("verify key: %w", err)
 		}
@@ -196,7 +191,6 @@ func (p *Pool) Decrypt(ctx context.Context, att *enclave.Attestation, keyRef str
 		return nil, err
 	}
 
-	// Decrypt data.
 	var decrypted []byte
 	switch decoded.Version {
 	case 1:
@@ -211,17 +205,15 @@ func (p *Pool) Decrypt(ctx context.Context, att *enclave.Attestation, keyRef str
 	return decrypted, nil
 }
 
-// fetchDEK returns the DEK for keyRef, serving it from the cache when possible
-// and otherwise loading it through loadDEK. Concurrent misses on the same keyRef
-// are deduplicated so only one of them performs the KMS round-trips.
+// fetchDEK serves keyRef from the cache, or loads it once on behalf of every
+// caller that misses concurrently.
 func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef string) ([]byte, error) {
 	if p.cache == nil {
 		dek, _, err := p.loadDEK(ctx, att, keyRef)
 		return dek, err
 	}
 
-	// The caller's span, not loadDEK's child: the annotation belongs on the
-	// operation whose latency it explains.
+	// The caller's span, not loadDEK's child, which only exists on a miss.
 	span := tracing.GetSpan(ctx)
 
 	if dek, ok := p.cache.get(keyRef); ok {
@@ -257,10 +249,9 @@ func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef st
 	}
 }
 
-// loadDEK recovers a DEK through the full path: DynamoDB lookup, attestation
-// verification, KMS share decryption, and Shamir combine. It reports whether the
-// result may be cached; a key whose migration failed must not be, or the retry
-// is suppressed until the entry expires.
+// loadDEK recovers a DEK through DynamoDB, attestation verification, KMS share
+// decryption and Shamir combine. A key whose migration failed is not cacheable:
+// caching it would suppress the retry until the entry expires.
 func (p *Pool) loadDEK(ctx context.Context, att *enclave.Attestation, keyRef string) (privateKey []byte, cacheable bool, err error) {
 	ctx, span := tracing.Trace(ctx, "encryption.Pool.loadDEK", tracing.WithAnnotation("key_ref", keyRef))
 	defer func() {
@@ -297,8 +288,6 @@ func (p *Pool) loadDEK(ctx context.Context, att *enclave.Attestation, keyRef str
 		return nil, false, fmt.Errorf("combine shares: %w", err)
 	}
 
-	// Migration is non-fatal: the DEK is returned either way, but a failed
-	// migration leaves the key uncacheable so the next decrypt retries it.
 	if p.keyNeedsMigration(key) {
 		if err := p.migrateKey(ctx, att, key, privateKey); err != nil {
 			p.logger.ErrorContext(ctx, "migrating key failed", "error", err, "key_ref", key.KeyRef, "generation", key.Generation, "key_index", key.KeyIndex)

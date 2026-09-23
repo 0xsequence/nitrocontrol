@@ -11,23 +11,18 @@ import (
 // CacheConfig configures the optional DEK (data encryption key) cache.
 // A zero-value config disables caching.
 type CacheConfig struct {
-	// MaxSize is the maximum number of DEKs to cache. Must be > 0 to enable caching.
+	// MaxSize is the maximum number of DEKs to cache.
 	MaxSize int
-	// TTL is the time-to-live for each cache entry. Must be > 0 to enable caching.
+	// TTL is how long a cached DEK lives, counted from when it is stored.
 	TTL time.Duration
 }
 
-// dekCache is an LRU of decrypted data encryption keys. Entries expire TTL
-// after they are stored, regardless of use.
+// dekCache is an LRU of decrypted data encryption keys.
 //
-// Evicted keys are left for the garbage collector rather than zeroed. Zeroing
-// would mean writing to a slice a concurrent reader may still be copying — the
-// LRU releases its lock before the caller is done with the value, and the
-// expiry sweeper runs on its own goroutine — which risks handing out a
-// half-cleared key and failing a decryption. It buys little in return: the
-// enclave already holds unscrubbed copies of this key from Shamir recombination
-// and the AES key schedule, and its memory is neither swappable nor readable
-// from the parent instance.
+// Evicted keys are not zeroed: the LRU releases its lock before the caller has
+// finished copying a value, so clearing one risks handing out a half-cleared
+// key. The enclave already holds unscrubbed copies from Shamir recombination
+// and the AES key schedule.
 type dekCache struct {
 	lru *expirable.LRU[string, []byte]
 	// group collapses concurrent misses on the same keyRef into one load.
@@ -38,7 +33,6 @@ func newDEKCache(maxSize int, ttl time.Duration) *dekCache {
 	return &dekCache{lru: expirable.NewLRU[string, []byte](maxSize, nil, ttl)}
 }
 
-// The cache and the caller each own their copy.
 func (c *dekCache) get(keyRef string) ([]byte, bool) {
 	dek, ok := c.lru.Get(keyRef)
 	if !ok {
