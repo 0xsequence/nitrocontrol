@@ -46,8 +46,6 @@ type Pool struct {
 	cache      *dekCache // nil when caching disabled
 }
 
-// annotationDEKCache records whether an operation's DEK came from the cache, a
-// full load, or another goroutine's in-flight load.
 const annotationDEKCache = "dek_cache"
 
 // PoolOption configures optional Pool behavior.
@@ -123,9 +121,8 @@ func (p *Pool) Encrypt(ctx context.Context, att *enclave.Attestation, plaintext 
 			p.cache.put(key.KeyRef, privateKey)
 		}
 	} else {
-		// The row is an unverified read and its KeyRef picks the DEK, so the
-		// attestation is checked before the cache is consulted; a hit must not
-		// skip it. Verification is local, so the cache still saves the KMS calls.
+		// The row is unverified and its KeyRef picks the DEK, so a cache hit
+		// must not skip this.
 		if err := p.VerifyKey(ctx, att, key); err != nil {
 			return "", nil, fmt.Errorf("verify key: %w", err)
 		}
@@ -205,8 +202,6 @@ func (p *Pool) Decrypt(ctx context.Context, att *enclave.Attestation, keyRef str
 	return decrypted, nil
 }
 
-// fetchDEK serves keyRef from the cache, or loads it once on behalf of every
-// caller that misses concurrently.
 func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef string) ([]byte, error) {
 	if p.cache == nil {
 		dek, _, err := p.loadDEK(ctx, att, keyRef)
@@ -249,9 +244,8 @@ func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef st
 	}
 }
 
-// loadDEK recovers a DEK through DynamoDB, attestation verification, KMS share
-// decryption and Shamir combine. A key whose migration failed is not cacheable:
-// caching it would suppress the retry until the entry expires.
+// A key whose migration failed is not cacheable: caching it would suppress the
+// retry until the entry expires.
 func (p *Pool) loadDEK(ctx context.Context, att *enclave.Attestation, keyRef string) (privateKey []byte, cacheable bool, err error) {
 	ctx, span := tracing.Trace(ctx, "encryption.Pool.loadDEK", tracing.WithAnnotation("key_ref", keyRef))
 	defer func() {

@@ -17,15 +17,8 @@ type CacheConfig struct {
 	TTL time.Duration
 }
 
-// dekCache is an LRU of decrypted data encryption keys.
-//
-// Evicted keys are not zeroed: the LRU releases its lock before the caller has
-// finished copying a value, so clearing one risks handing out a half-cleared
-// key. The enclave already holds unscrubbed copies from Shamir recombination
-// and the AES key schedule.
 type dekCache struct {
-	lru *expirable.LRU[string, []byte]
-	// group collapses concurrent misses on the same keyRef into one load.
+	lru   *expirable.LRU[string, []byte]
 	group singleflight.Group
 }
 
