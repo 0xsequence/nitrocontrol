@@ -1,11 +1,10 @@
 package encryption
 
 import (
-	"container/list"
 	"slices"
-	"sync"
 	"time"
 
+	"github.com/hashicorp/golang-lru/v2/expirable"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -18,98 +17,40 @@ type CacheConfig struct {
 	TTL time.Duration
 }
 
-// dekCacheEntry holds a cached DEK and its LRU/TTL metadata.
-type dekCacheEntry struct {
-	dek       []byte // 32-byte AES-256 key (owned copy)
-	keyRef    string // for reverse lookup from LRU list element
-	expiresAt time.Time
-	element   *list.Element // back-pointer into LRU list
-}
-
-// dekCache is a thread-safe LRU cache for decrypted data encryption keys.
-// It zeroes key material on every eviction path (TTL, LRU, delete, clear).
+// dekCache is an LRU of decrypted data encryption keys. Entries expire TTL
+// after they are stored, regardless of use.
+//
+// Evicted keys are left for the garbage collector rather than zeroed. Zeroing
+// would mean writing to a slice a concurrent reader may still be copying — the
+// LRU releases its lock before the caller is done with the value, and the
+// expiry sweeper runs on its own goroutine — which risks handing out a
+// half-cleared key and failing a decryption. It buys little in return: the
+// enclave already holds unscrubbed copies of this key from Shamir recombination
+// and the AES key schedule, and its memory is neither swappable nor readable
+// from the parent instance.
 type dekCache struct {
-	mu      sync.Mutex
-	entries map[string]*dekCacheEntry
-	order   *list.List // front = most recently used
-	maxSize int
-	ttl     time.Duration
-
+	lru *expirable.LRU[string, []byte]
 	// group collapses concurrent misses on the same keyRef into one load.
 	group singleflight.Group
 }
 
 func newDEKCache(maxSize int, ttl time.Duration) *dekCache {
-	return &dekCache{
-		entries: make(map[string]*dekCacheEntry),
-		order:   list.New(),
-		maxSize: maxSize,
-		ttl:     ttl,
-	}
+	return &dekCache{lru: expirable.NewLRU[string, []byte](maxSize, nil, ttl)}
 }
 
-// get returns a copy of the cached DEK for keyRef, or ok=false on miss/expiry.
+// The cache and the caller each own their copy.
 func (c *dekCache) get(keyRef string) ([]byte, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	entry, ok := c.entries[keyRef]
+	dek, ok := c.lru.Get(keyRef)
 	if !ok {
 		return nil, false
 	}
-
-	if time.Now().After(entry.expiresAt) {
-		c.evictLocked(entry)
-		return nil, false
-	}
-
-	c.order.MoveToFront(entry.element)
-	return slices.Clone(entry.dek), true
+	return slices.Clone(dek), true
 }
 
-// put stores a copy of dek in the cache, evicting the LRU entry if full.
 func (c *dekCache) put(keyRef string, dek []byte) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if entry, ok := c.entries[keyRef]; ok {
-		// Update existing entry.
-		clear(entry.dek)
-		entry.dek = slices.Clone(dek)
-		entry.expiresAt = time.Now().Add(c.ttl)
-		c.order.MoveToFront(entry.element)
-		return
-	}
-
-	entry := &dekCacheEntry{
-		dek:       slices.Clone(dek),
-		keyRef:    keyRef,
-		expiresAt: time.Now().Add(c.ttl),
-	}
-	entry.element = c.order.PushFront(entry)
-	c.entries[keyRef] = entry
-
-	if len(c.entries) > c.maxSize {
-		back := c.order.Back()
-		if back != nil {
-			c.evictLocked(back.Value.(*dekCacheEntry))
-		}
-	}
+	c.lru.Add(keyRef, slices.Clone(dek))
 }
 
-// delete removes and zeroes a specific entry. Called by RotateKey.
 func (c *dekCache) delete(keyRef string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if entry, ok := c.entries[keyRef]; ok {
-		c.evictLocked(entry)
-	}
-}
-
-// evictLocked removes an entry, zeroing its DEK. Caller must hold c.mu.
-func (c *dekCache) evictLocked(entry *dekCacheEntry) {
-	clear(entry.dek)
-	c.order.Remove(entry.element)
-	delete(c.entries, entry.keyRef)
+	c.lru.Remove(keyRef)
 }
