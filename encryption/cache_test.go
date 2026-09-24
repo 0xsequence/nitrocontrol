@@ -1,12 +1,30 @@
 package encryption
 
 import (
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestWithCache_DisablesCacheBelowMinTTL(t *testing.T) {
+	quiet := slog.New(slog.DiscardHandler)
+
+	for _, cfg := range []CacheConfig{
+		{MaxSize: 10, TTL: 0},
+		{MaxSize: 0, TTL: time.Minute},
+		{MaxSize: 10, TTL: 50},  // would panic expirable.LRU
+		{MaxSize: 10, TTL: 600}, // reads as seconds, means nanoseconds
+	} {
+		p := NewPool(nil, nil, nil, nil, quiet, WithCache(cfg))
+		require.Nil(t, p.cache, "cache should be disabled for %+v", cfg)
+	}
+
+	p := NewPool(nil, nil, nil, nil, quiet, WithCache(CacheConfig{MaxSize: 10, TTL: minCacheTTL}))
+	require.NotNil(t, p.cache)
+}
 
 func TestDEKCache_GetPut(t *testing.T) {
 	c := newDEKCache(10, time.Minute)

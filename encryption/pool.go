@@ -56,9 +56,14 @@ type PoolOption func(*Pool)
 // and starts a background eviction goroutine that runs until the process exits.
 func WithCache(cfg CacheConfig) PoolOption {
 	return func(p *Pool) {
-		if cfg.MaxSize > 0 && cfg.TTL > 0 {
-			p.cache = newDEKCache(cfg.MaxSize, cfg.TTL)
+		if cfg.MaxSize <= 0 || cfg.TTL <= 0 {
+			return
 		}
+		if cfg.TTL < minCacheTTL {
+			p.logger.Warn("DEK cache disabled: TTL below minimum", "ttl", cfg.TTL, "minimum", minCacheTTL)
+			return
+		}
+		p.cache = newDEKCache(cfg.MaxSize, cfg.TTL)
 	}
 }
 

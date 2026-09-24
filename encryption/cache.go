@@ -14,8 +14,14 @@ type CacheConfig struct {
 	// MaxSize is the maximum number of DEKs to cache.
 	MaxSize int
 	// TTL is how long a cached DEK lives, counted from when it is stored.
+	// Values below minCacheTTL disable the cache.
 	TTL time.Duration
 }
+
+// minCacheTTL keeps expirable.LRU's eviction ticker, which runs at TTL/100,
+// above 10ms. Below 100ns it panics outright, and a bare integer literal is a
+// legal time.Duration, so a TTL meant as seconds lands in that range.
+const minCacheTTL = time.Second
 
 type dekCache struct {
 	lru   *expirable.LRU[string, []byte]
