@@ -52,7 +52,8 @@ const annotationDEKCache = "dek_cache"
 type PoolOption func(*Pool)
 
 // WithCache enables an in-memory LRU cache for decrypted data encryption keys,
-// eliminating KMS round-trips on cache hits. The cache is local to this process.
+// eliminating KMS round-trips on cache hits. The cache is local to this process
+// and starts a background eviction goroutine that runs until the process exits.
 func WithCache(cfg CacheConfig) PoolOption {
 	return func(p *Pool) {
 		if cfg.MaxSize > 0 && cfg.TTL > 0 {
