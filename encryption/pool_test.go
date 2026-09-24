@@ -1413,8 +1413,17 @@ func TestPool_DecryptSingleflight(t *testing.T) {
 	remoteKey1.ExpectedCalls = nil
 	remoteKey2.ExpectedCalls = nil
 
-	// Re-register expectations.
-	remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").Return(shares[0], nil)
+	const N = 10
+
+	// Hold the load until every caller is inside Decrypt. The cache stays empty
+	// while it blocks, so a caller can only avoid its own load by coalescing.
+	started := make(chan struct{}, N)
+	release := make(chan struct{})
+	remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").
+		Run(func(mock.Arguments) {
+			started <- struct{}{}
+			<-release
+		}).Return(shares[0], nil)
 	remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Return(shares[1], nil)
 
 	// Invalidate cache so all goroutines start with a cold cache.
@@ -1423,15 +1432,15 @@ func TestPool_DecryptSingleflight(t *testing.T) {
 	err = pool.RotateKey(context.Background(), att, "cipherKey4")
 	require.NoError(t, err)
 
-	// Launch N concurrent decrypts.
-	const N = 10
-	var wg sync.WaitGroup
+	var entered, wg sync.WaitGroup
+	entered.Add(N)
 	errs := make([]error, N)
 	results := make([]string, N)
 	for i := 0; i < N; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
+			entered.Done()
 			pt, err := pool.Decrypt(context.Background(), att, "cipherKey4", ciphertext, []byte("aad"))
 			errs[idx] = err
 			if pt != nil {
@@ -1439,6 +1448,10 @@ func TestPool_DecryptSingleflight(t *testing.T) {
 			}
 		}(i)
 	}
+
+	<-started
+	entered.Wait()
+	close(release)
 	wg.Wait()
 
 	for i := 0; i < N; i++ {
@@ -1446,8 +1459,6 @@ func TestPool_DecryptSingleflight(t *testing.T) {
 		require.Equal(t, "test", results[i], "goroutine %d got wrong result", i)
 	}
 
-	// With singleflight, exactly one goroutine fetches. RemoteKey1.Decrypt
-	// should be called once (one share per remote key, one fetch total).
 	decryptCalls := len(remoteKey1.Calls)
 	require.Equal(t, 1, decryptCalls, "singleflight should deduplicate concurrent fetches (got %d calls to remoteKey1)", decryptCalls)
 }
