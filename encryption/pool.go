@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"time"
 
@@ -42,19 +43,45 @@ type Pool struct {
 	keysTable  KeysTable
 	dataTables []EncryptedDataTable
 	logger     *slog.Logger
+	cache      *dekCache // nil when caching disabled
 }
 
-func NewPool(attester Attester, configs []*Config, keysTable KeysTable, dataTables []EncryptedDataTable, logger *slog.Logger) *Pool {
+const annotationDEKCache = "dek_cache"
+
+// PoolOption configures optional Pool behavior.
+type PoolOption func(*Pool)
+
+// WithCache enables an in-memory LRU cache for decrypted data encryption keys,
+// eliminating KMS round-trips on cache hits. The cache is local to this process
+// and starts a background eviction goroutine that runs until the process exits.
+func WithCache(cfg CacheConfig) PoolOption {
+	return func(p *Pool) {
+		if cfg.MaxSize <= 0 || cfg.TTL <= 0 {
+			return
+		}
+		if cfg.TTL < minCacheTTL {
+			p.logger.Warn("DEK cache disabled: TTL below minimum", "ttl", cfg.TTL, "minimum", minCacheTTL)
+			return
+		}
+		p.cache = newDEKCache(cfg.MaxSize, cfg.TTL)
+	}
+}
+
+func NewPool(attester Attester, configs []*Config, keysTable KeysTable, dataTables []EncryptedDataTable, logger *slog.Logger, opts ...PoolOption) *Pool {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Pool{
+	p := &Pool{
 		attester:   attester,
 		configs:    configs,
 		keysTable:  keysTable,
 		dataTables: dataTables,
 		logger:     logger,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // Encrypt encrypts the plaintext using a randomly selected cipher key from the Pool. It returns the key reference
@@ -95,17 +122,38 @@ func (p *Pool) Encrypt(ctx context.Context, att *enclave.Attestation, plaintext 
 		if err != nil {
 			return "", nil, fmt.Errorf("generate key: %w", err)
 		}
-	} else if err := p.VerifyKey(ctx, att, key); err != nil {
-		return "", nil, fmt.Errorf("verify key: %w", err)
-	}
-	span.SetAnnotation("key_ref", key.KeyRef)
 
-	if privateKey == nil {
-		privateKey, err = p.combineShares(ctx, att, config, key.EncryptedShares)
-		if err != nil {
-			return "", nil, fmt.Errorf("combine shares: %w", err)
+		if p.cache != nil {
+			p.cache.put(key.KeyRef, privateKey)
+		}
+	} else {
+		// The row is unverified and its KeyRef picks the DEK, so a cache hit
+		// must not skip this.
+		if err := p.VerifyKey(ctx, att, key); err != nil {
+			return "", nil, fmt.Errorf("verify key: %w", err)
+		}
+
+		if p.cache != nil {
+			if dek, ok := p.cache.get(key.KeyRef); ok {
+				privateKey = dek
+				span.SetAnnotation(annotationDEKCache, "hit")
+			}
+		}
+		if privateKey == nil {
+			if p.cache != nil {
+				span.SetAnnotation(annotationDEKCache, "miss")
+			}
+			privateKey, err = p.combineShares(ctx, att, config, key.EncryptedShares)
+			if err != nil {
+				return "", nil, fmt.Errorf("combine shares: %w", err)
+			}
+
+			if p.cache != nil {
+				p.cache.put(key.KeyRef, privateKey)
+			}
 		}
 	}
+	span.SetAnnotation("key_ref", key.KeyRef)
 
 	encrypted, err := aesgcm.Encrypt(att, privateKey, plaintext, additionalData)
 	if err != nil {
@@ -126,7 +174,9 @@ func (p *Pool) Encrypt(ctx context.Context, att *enclave.Attestation, plaintext 
 
 // Decrypt decrypts the ciphertext using the latest cipher key from the Pool referenced by the keyRef.
 //
-// The key is verified against the attestation and migrated to the current generation if needed.
+// The key is verified against the attestation and migrated to the current
+// generation if needed. A cached DEK skips all of that: it was verified when it
+// was loaded, and its key ref never maps to different key material.
 func (p *Pool) Decrypt(ctx context.Context, att *enclave.Attestation, keyRef string, ciphertext []byte, additionalData []byte) (plaintext []byte, err error) {
 	ctx, span := tracing.Trace(ctx, "encryption.Pool.Decrypt", tracing.WithAnnotation("key_ref", keyRef))
 	defer func() {
@@ -139,33 +189,9 @@ func (p *Pool) Decrypt(ctx context.Context, att *enclave.Attestation, keyRef str
 		return nil, fmt.Errorf("decode ciphertext: %w", err)
 	}
 
-	key, found, err := p.keysTable.GetLatestByKeyRef(ctx, keyRef, false)
+	privateKey, err := p.fetchDEK(ctx, att, keyRef)
 	if err != nil {
-		return nil, fmt.Errorf("get latest key: %w", err)
-	}
-	if !found {
-		return nil, fmt.Errorf("key not found")
-	}
-	if err := p.VerifyKey(ctx, att, key); err != nil {
-		return nil, fmt.Errorf("verify key: %w", err)
-	}
-
-	span.SetAnnotation("generation", strconv.Itoa(key.Generation))
-	if key.KeyIndex != nil {
-		span.SetAnnotation("key_index", strconv.Itoa(*key.KeyIndex))
-	}
-
-	config, err := p.getConfig(key.Generation)
-	if err != nil {
-		return nil, fmt.Errorf("get config: %w", err)
-	}
-	if !config.areSharesValid(key.EncryptedShares) {
-		return nil, fmt.Errorf("shares are invalid")
-	}
-
-	privateKey, err := p.combineShares(ctx, att, config, key.EncryptedShares)
-	if err != nil {
-		return nil, fmt.Errorf("combine shares: %w", err)
+		return nil, err
 	}
 
 	var decrypted []byte
@@ -179,15 +205,97 @@ func (p *Pool) Decrypt(ctx context.Context, att *enclave.Attestation, keyRef str
 		return nil, fmt.Errorf("decrypt: %w", err)
 	}
 
-	if p.keyNeedsMigration(key) {
-		err := p.migrateKey(ctx, att, key, privateKey)
+	return decrypted, nil
+}
+
+func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef string) ([]byte, error) {
+	if p.cache == nil {
+		dek, _, err := p.loadDEK(ctx, att, keyRef)
+		return dek, err
+	}
+
+	// The caller's span, not loadDEK's child, which only exists on a miss.
+	span := tracing.GetSpan(ctx)
+
+	if dek, ok := p.cache.get(keyRef); ok {
+		span.SetAnnotation(annotationDEKCache, "hit")
+		return dek, nil
+	}
+
+	loaded := p.cache.group.DoChan(keyRef, func() (any, error) {
+		dek, cacheable, err := p.loadDEK(ctx, att, keyRef)
 		if err != nil {
-			// We don't want to fail the decryption if migration fails, log the error and continue
+			return nil, err
+		}
+		if cacheable {
+			p.cache.put(keyRef, dek)
+		}
+		return dek, nil
+	})
+
+	select {
+	case res := <-loaded:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		if res.Shared {
+			span.SetAnnotation(annotationDEKCache, "coalesced")
+		} else {
+			span.SetAnnotation(annotationDEKCache, "miss")
+		}
+		// Shared between everyone who coalesced onto this load.
+		return slices.Clone(res.Val.([]byte)), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// A key whose migration failed is not cacheable: caching it would suppress the
+// retry until the entry expires.
+func (p *Pool) loadDEK(ctx context.Context, att *enclave.Attestation, keyRef string) (privateKey []byte, cacheable bool, err error) {
+	ctx, span := tracing.Trace(ctx, "encryption.Pool.loadDEK", tracing.WithAnnotation("key_ref", keyRef))
+	defer func() {
+		span.RecordError(err)
+		span.End()
+	}()
+
+	key, found, err := p.keysTable.GetLatestByKeyRef(ctx, keyRef, false)
+	if err != nil {
+		return nil, false, fmt.Errorf("get latest key: %w", err)
+	}
+	if !found {
+		return nil, false, fmt.Errorf("key not found")
+	}
+	if err := p.VerifyKey(ctx, att, key); err != nil {
+		return nil, false, fmt.Errorf("verify key: %w", err)
+	}
+
+	span.SetAnnotation("generation", strconv.Itoa(key.Generation))
+	if key.KeyIndex != nil {
+		span.SetAnnotation("key_index", strconv.Itoa(*key.KeyIndex))
+	}
+
+	config, err := p.getConfig(key.Generation)
+	if err != nil {
+		return nil, false, fmt.Errorf("get config: %w", err)
+	}
+	if !config.areSharesValid(key.EncryptedShares) {
+		return nil, false, fmt.Errorf("shares are invalid")
+	}
+
+	privateKey, err = p.combineShares(ctx, att, config, key.EncryptedShares)
+	if err != nil {
+		return nil, false, fmt.Errorf("combine shares: %w", err)
+	}
+
+	if p.keyNeedsMigration(key) {
+		if err := p.migrateKey(ctx, att, key, privateKey); err != nil {
 			p.logger.ErrorContext(ctx, "migrating key failed", "error", err, "key_ref", key.KeyRef, "generation", key.Generation, "key_index", key.KeyIndex)
+			return privateKey, false, nil
 		}
 	}
 
-	return decrypted, nil
+	return privateKey, true, nil
 }
 
 // RotateKey marks a key as inactive by setting its KeyIndex to a negative value. It won't be used for encrypting
@@ -230,6 +338,10 @@ func (p *Pool) RotateKey(ctx context.Context, att *enclave.Attestation, keyRef s
 
 	if err := p.keysTable.Deactivate(ctx, key.KeyRef, key.Generation, now, keyAtt.Document()); err != nil {
 		return fmt.Errorf("deactivate key: %w", err)
+	}
+
+	if p.cache != nil {
+		p.cache.delete(keyRef)
 	}
 
 	return nil
@@ -279,6 +391,9 @@ func (p *Pool) CleanupUnusedKeys(ctx context.Context) (deleted int, err error) {
 				p.logger.InfoContext(ctx, "deleting unused cipher key", "key_ref", key.KeyRef, "generation", key.Generation, "key_index", key.KeyIndex)
 				if err := p.keysTable.Delete(ctx, key.KeyRef, key.Generation); err != nil {
 					return deleted, fmt.Errorf("delete cipher key by ref %q: %w", key.KeyRef, err)
+				}
+				if p.cache != nil {
+					p.cache.delete(key.KeyRef)
 				}
 				deleted++
 			}

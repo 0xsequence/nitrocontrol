@@ -12,7 +12,9 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/kms v1.46.2
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/go-chi/chi/v5 v5.2.5
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/sync v0.20.0
 	golang.org/x/tools v0.43.0
 )
 
@@ -30,6 +32,5 @@ require (
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/mod v0.34.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
