@@ -113,6 +113,10 @@ func (m *MockRemoteKey) Encrypt(ctx context.Context, att *enclave.Attestation, p
 
 func (m *MockRemoteKey) Decrypt(ctx context.Context, att *enclave.Attestation, ciphertext string) ([]byte, error) {
 	args := m.Called(ctx, att, ciphertext)
+	// A real KMS call observes cancellation while in flight.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}

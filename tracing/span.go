@@ -55,6 +55,11 @@ func Trace(ctx context.Context, name string, opts ...func(*Span)) (context.Conte
 	return context.WithValue(ctx, spanKey{}, span), span
 }
 
+// Detach returns ctx without its current span, so the next Trace starts a new root.
+func Detach(ctx context.Context) context.Context {
+	return context.WithValue(ctx, spanKey{}, (*Span)(nil))
+}
+
 type spanKey struct{}
 type configKey struct{}
 
