@@ -48,6 +48,9 @@ type Pool struct {
 
 const annotationDEKCache = "dek_cache"
 
+// dekLoadTimeout bounds a coalesced load that no longer answers to any caller.
+const dekLoadTimeout = 30 * time.Second
+
 // PoolOption configures optional Pool behavior.
 type PoolOption func(*Pool)
 
@@ -223,7 +226,11 @@ func (p *Pool) fetchDEK(ctx context.Context, att *enclave.Attestation, keyRef st
 	}
 
 	loaded := p.cache.group.DoChan(keyRef, func() (any, error) {
-		dek, cacheable, err := p.loadDEK(ctx, att, keyRef)
+		// Shared by everyone who coalesces here, so no one caller's cancellation ends it.
+		loadCtx, cancel := context.WithTimeout(tracing.Detach(context.WithoutCancel(ctx)), dekLoadTimeout)
+		defer cancel()
+
+		dek, cacheable, err := p.loadDEK(loadCtx, att, keyRef)
 		if err != nil {
 			return nil, err
 		}
@@ -289,7 +296,7 @@ func (p *Pool) loadDEK(ctx context.Context, att *enclave.Attestation, keyRef str
 	}
 
 	if p.keyNeedsMigration(key) {
-		if err := p.migrateKey(ctx, att, key, privateKey); err != nil {
+		if err := p.migrateKey(ctx, key, privateKey); err != nil {
 			p.logger.ErrorContext(ctx, "migrating key failed", "error", err, "key_ref", key.KeyRef, "generation", key.Generation, "key_index", key.KeyIndex)
 			return privateKey, false, nil
 		}
@@ -536,7 +543,7 @@ func (p *Pool) keyNeedsMigration(key *data.CipherKey) bool {
 	return key.Generation < generation
 }
 
-func (p *Pool) migrateKey(ctx context.Context, att *enclave.Attestation, key *data.CipherKey, privateKey []byte) (err error) {
+func (p *Pool) migrateKey(ctx context.Context, key *data.CipherKey, privateKey []byte) (err error) {
 	ctx, span := tracing.Trace(ctx, "encryption.Pool.migrateKey")
 	defer func() {
 		span.RecordError(err)
@@ -552,6 +559,12 @@ func (p *Pool) migrateKey(ctx context.Context, att *enclave.Attestation, key *da
 	if err != nil {
 		return fmt.Errorf("split private key: %w", err)
 	}
+
+	att, err := p.attester.GetAttestation(ctx, nil, nil)
+	if err != nil {
+		return fmt.Errorf("get attestation: %w", err)
+	}
+	defer func() { _ = att.Close() }()
 
 	i := 0
 	encryptedShares := make(map[string]string)

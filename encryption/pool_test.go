@@ -622,8 +622,8 @@ func TestPool_Decrypt(t *testing.T) {
 		remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").Once().Return(shares[0], nil)
 		remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Once().Return(shares[1], nil)
 
-		remoteKey3.On("Encrypt", mock.Anything, att, mock.Anything).Once().Return("encryptedShare3", nil)
-		remoteKey4.On("Encrypt", mock.Anything, att, mock.Anything).Once().Return("encryptedShare4", nil)
+		remoteKey3.On("Encrypt", mock.Anything, mock.AnythingOfType("*enclave.Attestation"), mock.Anything).Once().Return("encryptedShare3", nil)
+		remoteKey4.On("Encrypt", mock.Anything, mock.AnythingOfType("*enclave.Attestation"), mock.Anything).Once().Return("encryptedShare4", nil)
 
 		var migratedKey *data.CipherKey
 		createMatcher := func(key *data.CipherKey) bool {
@@ -700,8 +700,8 @@ func TestPool_Decrypt(t *testing.T) {
 		remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").Return(shares[0], nil)
 		remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Return(shares[1], nil)
 
-		remoteKey3.On("Encrypt", mock.Anything, att, mock.Anything).Return("encryptedShare3", nil)
-		remoteKey4.On("Encrypt", mock.Anything, att, mock.Anything).Return("", errors.New("mock error"))
+		remoteKey3.On("Encrypt", mock.Anything, mock.AnythingOfType("*enclave.Attestation"), mock.Anything).Return("encryptedShare3", nil)
+		remoteKey4.On("Encrypt", mock.Anything, mock.AnythingOfType("*enclave.Attestation"), mock.Anything).Return("", errors.New("mock error"))
 
 		pool := encryption.NewPool(enc, configs, keysTable, nil, nil)
 		plaintext, err := pool.Decrypt(context.Background(), att, "cipherKey4", legacyCiphertext55_v2, []byte("aad"))
@@ -1461,6 +1461,94 @@ func TestPool_DecryptSingleflight(t *testing.T) {
 
 	decryptCalls := len(remoteKey1.Calls)
 	require.Equal(t, 1, decryptCalls, "singleflight should deduplicate concurrent fetches (got %d calls to remoteKey1)", decryptCalls)
+}
+
+func TestPool_DecryptSurvivesLeaderCancellation(t *testing.T) {
+	block, _ := pem.Decode([]byte(dummyPrivKey))
+	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(t, err)
+
+	kmsClient := &MockKMS{}
+	remoteKey1 := &MockRemoteKey{}
+	remoteKey2 := &MockRemoteKey{}
+	keysTable := &MockKeysTable{}
+
+	random := &constantReader{value: 0x42}
+	enc, err := enclave.New(context.Background(), enclave.DummyProvider(random), kmsClient, privKey)
+	require.NoError(t, err)
+
+	configs := []*encryption.Config{
+		{
+			PoolSize:  10,
+			Threshold: 2,
+			RemoteKeys: map[string]encryption.RemoteKey{
+				"remoteKey1": remoteKey1,
+				"remoteKey2": remoteKey2,
+			},
+		},
+	}
+
+	att, err := enc.GetAttestation(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer func() { _ = att.Close() }()
+
+	cipherKey, privateKey := newCipherKey(t, enc)
+	shares, err := shamir.Split(privateKey, 2, 2)
+	require.NoError(t, err)
+
+	keysTable.On("Get", mock.Anything, 0, 4).Return(cipherKey, true, nil)
+	keysTable.On("GetLatestByKeyRef", mock.Anything, "cipherKey4", false).Return(cipherKey, true, nil)
+	remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").Return(shares[0], nil)
+	remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Return(shares[1], nil)
+
+	pool := encryption.NewPool(enc, configs, keysTable, nil, nil,
+		encryption.WithCache(encryption.CacheConfig{MaxSize: 10, TTL: time.Minute}))
+
+	_, ciphertext, err := pool.Encrypt(context.Background(), att, []byte("test"), []byte("aad"))
+	require.NoError(t, err)
+
+	remoteKey1.Calls, remoteKey1.ExpectedCalls = nil, nil
+	remoteKey2.Calls, remoteKey2.ExpectedCalls = nil, nil
+
+	// Hold the load until the leader has given up, so the follower is provably
+	// waiting on a load started from a context that is already cancelled.
+	leaderGone := make(chan struct{})
+	loadStarted := make(chan struct{}, 2)
+	remoteKey1.On("Decrypt", mock.Anything, att, "encryptedShare1").
+		Run(func(mock.Arguments) {
+			loadStarted <- struct{}{}
+			<-leaderGone
+		}).Return(shares[0], nil)
+	remoteKey2.On("Decrypt", mock.Anything, att, "encryptedShare2").Return(shares[1], nil)
+
+	keysTable.On("GetLatestByKeyRef", mock.Anything, "cipherKey4", true).Return(cipherKey, true, nil)
+	keysTable.On("Deactivate", mock.Anything, "cipherKey4", 0, mock.AnythingOfType("time.Time"), mock.Anything).Return(nil)
+	require.NoError(t, pool.RotateKey(context.Background(), att, "cipherKey4"))
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _ = pool.Decrypt(leaderCtx, att, "cipherKey4", ciphertext, []byte("aad"))
+	}()
+
+	// The leader owns the load once its share decrypt is in flight.
+	<-loadStarted
+
+	followerDone := make(chan error, 1)
+	var plaintext []byte
+	go func() {
+		pt, err := pool.Decrypt(context.Background(), att, "cipherKey4", ciphertext, []byte("aad"))
+		plaintext = pt
+		followerDone <- err
+	}()
+
+	cancelLeader()
+	<-leaderDone
+	close(leaderGone)
+
+	require.NoError(t, <-followerDone, "a cancelled leader must not fail the coalesced load")
+	require.Equal(t, "test", string(plaintext))
 }
 
 func TestPool_EncryptNewKeyPopulatesCache(t *testing.T) {
