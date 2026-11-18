@@ -20,7 +20,20 @@ import (
 //
 // If the HTTP request includes an X-Attestation-Nonce header, its value is sent to the NSM and included in
 // the final attestation document.
-func Middleware(enc *enclave.Enclave, errorFn func(http.ResponseWriter, error), loggerFromContextFn func(context.Context) *slog.Logger) func(http.Handler) http.Handler {
+//
+// The document's user_data binds the request and response:
+//
+//	Sequence/1:<base64(SHA-256(METHOD + " " + PATH + "\n" + reqBody + "\n" + resBody))>
+//
+// With WithBoundHeader(name), the raw value of that request header (empty if absent) is also bound:
+//
+//	Sequence/2:<base64(SHA-256(METHOD + " " + PATH + "\n" + headerValue + "\n" + reqBody + "\n" + resBody))>
+func Middleware(enc *enclave.Enclave, errorFn func(http.ResponseWriter, error), loggerFromContextFn func(context.Context) *slog.Logger, opts ...Option) func(http.Handler) http.Handler {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	runPreMiddleware := func(r *http.Request) (ctx context.Context, cancelFunc func(), err error) {
 		ctx, span := tracing.Trace(r.Context(), "attestation.Middleware")
 		defer func() {
@@ -52,7 +65,7 @@ func Middleware(enc *enclave.Enclave, errorFn func(http.ResponseWriter, error), 
 			span.End()
 		}()
 
-		userData, err := generateUserData(r, reqBody, resBody)
+		userData, err := generateUserData(r, reqBody, resBody, o.boundHeader)
 		if err != nil {
 			return err
 		}
@@ -120,6 +133,18 @@ func Middleware(enc *enclave.Enclave, errorFn func(http.ResponseWriter, error), 
 			}
 		})
 	}
+}
+
+type options struct {
+	boundHeader string
+}
+
+// Option configures Middleware.
+type Option func(*options)
+
+// WithBoundHeader binds the raw value of the named request header into the attestation user data (Sequence/2 format).
+func WithBoundHeader(name string) Option {
+	return func(o *options) { o.boundHeader = name }
 }
 
 func isNonceValid(s string) bool {
