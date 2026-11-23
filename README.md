@@ -112,6 +112,22 @@ r.Use(attestation.Middleware(enc, errorFn, loggerFn))
 att := attestation.FromContext(r.Context())
 ```
 
+The attestation document's `user_data` binds the request and response:
+
+```
+Sequence/1:<base64(SHA-256(METHOD + " " + PATH + "\n" + reqBody + "\n" + resBody))>
+```
+
+To also bind a request header (e.g. a client signature), pass `attestation.WithBoundHeader(name)`. The header's raw value (empty if absent) is hashed and the version becomes `Sequence/2`:
+
+```go
+r.Use(attestation.Middleware(enc, errorFn, loggerFn, attestation.WithBoundHeader("Oms-Wallet-Signature")))
+```
+
+```
+Sequence/2:<base64(SHA-256(METHOD + " " + PATH + "\n" + headerValue + "\n" + reqBody + "\n" + resBody))>
+```
+
 ### Tracing
 
 ```go
